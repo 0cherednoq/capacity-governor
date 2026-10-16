@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "capacity-governor"
+version = "0.1.0"
+description = "Политика распределения ёмкости дефицитных ресурсов и политика пополнения"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "simpy>=4.1", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/capacity"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests", "sim"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "A", "B", "UP", "SIM", "RUF", "PL", "C4"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Сборка такта принимает все свои входы явно и только по имени — это её смысл.
+"src/capacity/governor.py" = ["PLR0913"]
+"tests/*" = ["PLR2004", "PLR0913", "PLR0917"]
+"sim/*" = ["PLR2004", "PLR0913", "PLR0917"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "sim", "tests"]
