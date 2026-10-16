@@ -1,7 +1,9 @@
 # capacity-governor
 
 Политика распределения ёмкости дефицитных ресурсов между потребителями и политика
-пополнения ресурса. Кода пока нет — есть только план.
+пополнения ресурса. Чистые политики, слой стабилизации и симуляция готовы; контур и
+адаптеры ждут Tallyho и Identity Hub — состояние по шагам в
+[`docs/implementation-progress.md`](docs/implementation-progress.md).
 
 Библиотека отвечает на два вопроса:
 
@@ -19,6 +21,7 @@
 | Документ | Что внутри |
 |---|---|
 | [`docs/resource-management-plan.md`](docs/resource-management-plan.md) | план реализации: порты, алгоритмы политик, контур, мёртвая зона, симуляция, гейт на вынос в отдельный пакет |
+| [`docs/implementation-progress.md`](docs/implementation-progress.md) | журнал прогресса: шаги, приёмка, отступления от плана, результаты прогонов |
 
 Связанные документы в других репозиториях:
 
@@ -44,4 +47,26 @@
 
 С чего начинать: пункты 1–4 и 8 порядка работ (типы, `MaxMinFair` на deficit round
 robin, `ReorderPoint`, мёртвая зона, симуляция SimPy). Они не зависят ни от Tallyho,
-ни от Identity Hub — это чистые функции и прогоны симуляции.
+ни от Identity Hub — это чистые функции и прогоны симуляции. **Сделано.**
+
+## Что в коде
+
+```
+src/capacity/            ядро фазы A: ни одного импорта проекта, только stdlib
+  types.py               ConsumerState, Allocation, EligibleCapacity, SupplySnapshot
+  ports.py               Protocol'ы: источники ёмкости и запаса, окна, дефициты, пины
+  policies/              MaxMinFair (DRR), Sequential, ReorderPoint
+  stabilize.py           мёртвая зона и выдержка при уменьшении окна
+  governor.py            plan_tick: чистая часть такта (pin, pause, заказ, метрики)
+sim/                     модель пула на SimPy и шесть прогонов G8
+tests/                   таблицы приёмки плана и приёмка прогонов
+```
+
+## Как запускать
+
+```bash
+python -m venv .venv && .venv/bin/pip install -e ".[dev]"
+pytest                  # 94 теста: таблицы приёмки плана и прогоны симуляции
+python -m sim            # отчёт по шести прогонам G8
+ruff check . && mypy src tests sim
+```
