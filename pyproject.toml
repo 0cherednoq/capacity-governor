@@ -5,10 +5,41 @@ build-backend = "hatchling.build"
 [project]
 name = "capacity-governor"
 version = "0.1.0"
-description = "Политика распределения ёмкости дефицитных ресурсов и политика пополнения"
+description = "Capacity allocation and replenishment policies for scarce resources: max-min fair sharing, sequential drain and (s, S) reordering."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "0cherednoq" }]
+keywords = [
+  "asyncio",
+  "capacity",
+  "fair-share",
+  "max-min-fair",
+  "rate-limiting",
+  "inventory",
+  "postgresql",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/0cherednoq/capacity-governor"
+Repository = "https://github.com/0cherednoq/capacity-governor"
+Changelog = "https://github.com/0cherednoq/capacity-governor/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # Ядру (`capacity/`) зависимости не нужны ни одной — это условие гейта G0 и оно

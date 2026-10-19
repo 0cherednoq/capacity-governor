@@ -24,6 +24,8 @@
 |---|---|
 | [`docs/resource-management-plan.md`](docs/resource-management-plan.md) | план реализации: порты, алгоритмы политик, контур, мёртвая зона, симуляция, гейт на вынос в отдельный пакет |
 | [`docs/implementation-progress.md`](docs/implementation-progress.md) | журнал прогресса: шаги, приёмка, отступления от плана, результаты прогонов |
+| [`docs/releasing.md`](docs/releasing.md) | выпуск: trusted publishing, окружения GitHub, порядок тега |
+| [`CHANGELOG.md`](CHANGELOG.md) | что вошло в версии |
 
 Связанные документы в других репозиториях:
 

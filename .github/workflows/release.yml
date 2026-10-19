@@ -1,0 +1,168 @@
+name: release
+
+# Выпуск идёт от тега: `git tag v0.1.0 && git push origin v0.1.0`. Версия в теге
+# обязана совпадать с версией в pyproject.toml — это проверяется до сборки, иначе в
+# индекс уйдёт пакет под чужим номером, а исправить опубликованную версию нельзя.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Куда публиковать
+        required: true
+        default: testpypi
+        type: choice
+        options: [testpypi, pypi]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: capacity
+          POSTGRES_PASSWORD: capacity
+          POSTGRES_DB: capacity
+        ports:
+          - 55444:5432
+        options: >-
+          --health-cmd "pg_isready -U capacity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAPACITY_TEST_DSN: postgresql+asyncpg://capacity:capacity@127.0.0.1:55444/capacity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,postgres]" asyncpg
+      - run: ruff check .
+      - run: mypy src tests sim
+      - run: pytest -q
+
+  build:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Проверить, что тег и версия пакета совпадают
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+
+          tag = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          pyproject = tomllib.loads(pathlib.Path("pyproject.toml").read_text("utf-8"))
+          version = pyproject["project"]["version"]
+          if tag != version:
+              raise SystemExit(f"тег v{tag} не совпадает с версией пакета {version}")
+          print(f"версия {version} совпадает с тегом")
+          PY
+      - run: pip install build
+      - run: python -m build
+      - name: Проверить колесо в чистом окружении
+        run: |
+          python -m venv /tmp/check
+          /tmp/check/bin/pip install dist/*.whl
+          /tmp/check/bin/python - <<'PY'
+          from capacity import ConsumerState, MaxMinFair
+          import capacity_adapters.identity_hub, capacity_adapters.tallyho
+
+          grants = MaxMinFair().allocate(
+              30, [ConsumerState("A", 1000), ConsumerState("B", 5)], {}
+          ).grants
+          assert dict(grants) == {"A": 25, "B": 5}, grants
+          print("колесо работает без зависимостей")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  testpypi:
+    # Прогон публикации на TestPyPI: тот же путь, что и в PyPI, но ошибку можно
+    # исправить. Запускается вручную; версия, уже загруженная туда, повторно не идёт.
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/capacity-governor
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  pypi:
+    # Публикация через trusted publishing: токенов в секретах нет, GitHub получает
+    # короткоживущий OIDC-токен. Окружение `pypi` с обязательным ревью делает выпуск
+    # осознанным действием, а не следствием случайного тега.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/capacity-governor
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    needs: pypi
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Создать релиз с заметками из CHANGELOG
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY' > notes.md
+          import os
+          import pathlib
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          lines = pathlib.Path("CHANGELOG.md").read_text("utf-8").splitlines()
+          start = next(
+              (i for i, line in enumerate(lines) if line.startswith(f"## {tag}")), None
+          )
+          if start is None:
+              print(f"Заметок для {tag} в CHANGELOG.md нет.")
+          else:
+              end = next(
+                  (
+                      i
+                      for i, line in enumerate(lines[start + 1 :], start + 1)
+                      if line.startswith("## ")
+                  ),
+                  len(lines),
+              )
+              print("\n".join(lines[start + 1 : end]).strip())
+          PY
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
