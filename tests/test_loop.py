@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -316,3 +317,59 @@ def test_fakes_satisfy_the_ports() -> None:
     assert isinstance(FakeSupply(SupplySnapshot(effective_available=0.0)), SupplySource)
     assert isinstance(FakeReplenisher(), Replenisher)
     assert isinstance(FakeClock(NOW), Clock)
+
+
+# --- пробуждение отложенной работы ---------------------------------------------------
+
+
+@dataclass(slots=True)
+class FakeWaker:
+    woken: list[str] = field(default_factory=list)
+
+    async def wake(self, consumer_id: str) -> None:
+        self.woken.append(consumer_id)
+
+
+@pytest.mark.asyncio
+async def test_waker_is_called_when_the_window_reopens() -> None:
+    """Окно выросло с нуля — отложенная работа не должна ждать своего срока."""
+    governor, _ = build(free=10, demands=(100,), windows={"c0": 0})
+    waker = FakeWaker()
+    governor.waker = waker
+
+    await governor.tick()
+
+    assert waker.woken == ["c0"]
+
+
+@pytest.mark.asyncio
+async def test_waker_is_not_called_for_a_window_that_was_already_open() -> None:
+    """Работа и так идёт: будить нечего, лишний запрос ни к чему."""
+    governor, _ = build(free=10, demands=(100,), windows={"c0": 4})
+    waker = FakeWaker()
+    governor.waker = waker
+
+    await governor.tick()
+
+    assert waker.woken == []
+
+
+@pytest.mark.asyncio
+async def test_waker_is_not_called_when_the_window_closes() -> None:
+    governor, _ = build(free=0, demands=(100,), windows={"c0": 5})
+    waker = FakeWaker()
+    governor.waker = waker
+
+    await governor.tick()
+
+    assert waker.woken == []
+
+
+@pytest.mark.asyncio
+async def test_loop_works_without_a_waker() -> None:
+    """Порт необязательный: без него спасают короткие сроки отложения."""
+    governor, _ = build(free=10, demands=(100,), windows={"c0": 0})
+
+    outcome = await governor.tick()
+
+    assert outcome.ran

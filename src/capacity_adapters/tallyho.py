@@ -105,6 +105,8 @@ class BatchView(Protocol):
 class BatchHandle(Protocol):
     async def view(self) -> BatchView: ...
 
+    async def reschedule(self, start_at: datetime, *, session: Any = None) -> int: ...
+
     async def set_max_in_flight(
         self, limit: int, *, session: Any = None, reason: str | None = None
     ) -> None: ...
@@ -167,14 +169,19 @@ class TallyhoClient(Protocol):
 # --- спрос и окна одним снимком -----------------------------------------------------
 
 
-def ready_demand(row: BatchDemand) -> int:
+def ready_demand(row: BatchDemand, *, wakeable: bool = False) -> int:
     """Сколько работы потребитель может запустить прямо сейчас.
 
     Отложенные items (`item.defer`) из спроса вычитаются: они не уйдут в брокер раньше
     своего срока, и окно под них простояло бы впустую. В пополнении спрос считается
     иначе — там нужна вся оставшаяся работа, включая отложенную.
+
+    `wakeable` переворачивает это рассуждение. Если контуру дан `DeferredWaker`, он
+    выпускает отложенную работу сам, как только открывает окно, — и тогда вычитать её
+    нельзя: спрос станет нулевым, окно не откроется, будить будет нечего и работа
+    останется лежать до конца срока. Этот замкнутый круг и разрывает флаг.
     """
-    return max(0, row.pending - row.deferred)
+    return row.pending if wakeable else max(0, row.pending - row.deferred)
 
 
 @dataclass(slots=True)
@@ -191,6 +198,8 @@ class TallyhoDemand:
     kinds: Sequence[str]
     attributes: Mapping[str, object] | None = None
     limit: int = 1000
+    wakeable: bool = False
+    """Контуру дан `DeferredWaker`: отложенная работа входит в спрос, см. `ready_demand`."""
     weight_of: Callable[[BatchDemand], int] = lambda _: 1
     guaranteed_of: Callable[[BatchDemand], int] = lambda _: 0
     ceiling_of: Callable[[BatchDemand], int | None] = lambda _: None
@@ -212,7 +221,7 @@ class TallyhoDemand:
         return [
             ConsumerState(
                 consumer_id=consumer_id,
-                demand=ready_demand(row),
+                demand=ready_demand(row, wakeable=self.wakeable),
                 weight=self.weight_of(row),
                 guaranteed=self.guaranteed_of(row),
                 ceiling=self.ceiling_of(row),
@@ -266,6 +275,37 @@ class TallyhoWindows:
         for consumer_id, limit in windows.items():
             handle = self.client.handle(UUID(consumer_id))
             await handle.set_max_in_flight(limit, session=session, reason=self.reason)
+
+
+@dataclass(slots=True)
+class TallyhoWaker:
+    """`DeferredWaker` поверх `handle.reschedule()`.
+
+    Задача, не получившая ресурс, откладывает себя на выбранный ею срок. Когда контур
+    открывает окно раньше этого срока, работа всё равно ждёт — `reschedule(now)`
+    переносит её на сейчас.
+
+    **Переносится всё, что ещё не отправлено**, а не только отложенное из-за ресурса:
+    такого API в Tallyho нет. Поэтому будить стоит только те батчи, где единственная
+    причина отложения — нехватка ресурса. Если проект откладывает работу и по своим
+    причинам (скажем, ретрай через час), берите короткие сроки для ресурсных причин и
+    не подключайте этот порт.
+
+    `now` обязан быть **настоящими** часами, даже если контур в тестах живёт по
+    виртуальным: `reschedule` переносит работу на переданный момент, и часы, идущие
+    впереди реальных, отправят её в будущее — работа встанет вместо того, чтобы
+    проснуться.
+    """
+
+    client: TallyhoClient
+    now: Callable[[], datetime]
+    session_provider: Callable[[], Any] | None = None
+
+    async def wake(self, consumer_id: str) -> None:
+        session = self.session_provider() if self.session_provider else None
+        await self.client.handle(UUID(consumer_id)).reschedule(
+            self.now(), session=session
+        )
 
 
 @dataclass(slots=True)

@@ -14,12 +14,13 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from capacity.ports import ConsumerRegistry, Replenisher, WindowSink
+from capacity.ports import ConsumerRegistry, DeferredWaker, Replenisher, WindowSink
 from capacity_adapters.tallyho import (
     DemandTruncatedError,
     TallyhoDemand,
     TallyhoOrderLedger,
     TallyhoReplenisher,
+    TallyhoWaker,
     TallyhoWindows,
     TaskCall,
     ready_demand,
@@ -71,6 +72,10 @@ class FakePage:
 class FakeHandle:
     batch_id: UUID
     client: FakeTallyho
+
+    async def reschedule(self, start_at: datetime, *, session: object = None) -> int:
+        self.client.rescheduled.append((self.batch_id, start_at, session))
+        return 0
 
     async def view(self) -> FakeView:
         self.client.views += 1
@@ -133,6 +138,7 @@ class FakeTallyho:
     )
     batches: list[tuple[str, str | None, bool, int | None]] = field(default_factory=list)
     added: list[str] = field(default_factory=list)
+    rescheduled: list[tuple[UUID, datetime, object]] = field(default_factory=list)
     views: int = 0
 
     def handle(self, batch_id: UUID) -> FakeHandle:
@@ -209,6 +215,54 @@ async def test_deferred_work_is_not_counted_as_ready_demand() -> None:
 
 def test_ready_demand_never_goes_negative() -> None:
     assert ready_demand(FakeDemand(pending=3, deferred=10)) == 0
+
+
+def test_wakeable_demand_counts_deferred_work() -> None:
+    """С будильником отложенная работа входит в спрос — иначе её некому разбудить.
+
+    Вычесть её и ждать, что окно откроется, нельзя: спрос станет нулевым, окна не
+    будет, будить будет нечего, и работа пролежит до конца срока отложения.
+    """
+    row = FakeDemand(pending=30, deferred=12)
+
+    assert ready_demand(row) == 18
+    assert ready_demand(row, wakeable=True) == 30
+
+
+async def test_wakeable_source_reports_the_whole_backlog() -> None:
+    client = FakeTallyho(rows=[FakeDemand(pending=30, deferred=12)])
+    source = demand_source(client, wakeable=True)
+
+    assert (await source.consumers())[0].demand == 30
+
+
+# --- будильник ----------------------------------------------------------------------
+
+
+async def test_waker_reschedules_the_batch_to_now() -> None:
+    """Окно открылось раньше срока отложения — работу переносим на сейчас."""
+    row = FakeDemand(pending=5, deferred=5)
+    client = FakeTallyho(rows=[row])
+    waker = TallyhoWaker(client, now=lambda: NOW)
+
+    await waker.wake(str(row.id))
+
+    assert client.rescheduled == [(row.id, NOW, None)]
+
+
+async def test_waker_uses_the_tick_session() -> None:
+    row = FakeDemand(pending=5, deferred=5)
+    client = FakeTallyho(rows=[row])
+    session = object()
+    waker = TallyhoWaker(client, now=lambda: NOW, session_provider=lambda: session)
+
+    await waker.wake(str(row.id))
+
+    assert client.rescheduled[0][2] is session
+
+
+def test_waker_satisfies_the_port() -> None:
+    assert isinstance(TallyhoWaker(FakeTallyho(), now=lambda: NOW), DeferredWaker)
 
 
 async def test_paused_batch_is_not_a_consumer() -> None:

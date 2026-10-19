@@ -30,6 +30,7 @@ from capacity.ports import (
     CapacitySource,
     Clock,
     ConsumerRegistry,
+    DeferredWaker,
     OverrideStore,
     Replenisher,
     StateStore,
@@ -82,6 +83,7 @@ class Governor:
     supply: SupplySource | None = None
     reorder: ReorderPoint | None = None
     replenisher: Replenisher | None = None
+    waker: DeferredWaker | None = None
     observer: TickObserver | None = None
     min_tick_interval: timedelta = timedelta(seconds=1)
     last_tick_at: datetime | None = field(default=None, init=False)
@@ -90,6 +92,7 @@ class Governor:
         """Один такт целиком. Повтор такта ничего не ломает: окна абсолютны."""
         plan: TickPlan | None = None
         paused = False
+        reopened: list[str] = []
 
         async with self.scope.lead() as leading:
             if not leading:
@@ -121,6 +124,11 @@ class Governor:
                 paused=paused,
             )
 
+            reopened = [
+                cid
+                for cid, limit in plan.windows.items()
+                if limit > 0 and current_windows.get(cid, 0) == 0
+            ]
             if plan.windows:
                 await self.windows.set_windows(plan.windows)
             await self.state.save(plan.deficits, plan.holds)
@@ -129,6 +137,12 @@ class Governor:
         # Дальше — уже вне транзакции такта и вне лидерского лока.
         if plan is None:  # pragma: no cover - ветка без лидерства вернулась выше
             return TickOutcome(status=TickStatus.NOT_LEADER)
+        # Окно открылось — работа, отложенная из-за нехватки ресурса, ждёт своего
+        # срока и не знает, что ресурс уже вернулся. Будим её, иначе окно простоит
+        # до конца отложения.
+        if reopened and self.waker is not None:
+            for consumer_id in reopened:
+                await self.waker.wake(consumer_id)
         if plan.order > 0 and plan.order_window_key and self.replenisher is not None:
             await self.replenisher.order(plan.order, plan.order_window_key)
         if self.observer is not None:

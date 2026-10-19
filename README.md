@@ -141,7 +141,7 @@ python -m examples.proxy_pool
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev,postgres]" asyncpg
-pytest -q                # 261 тест: политики, контур, адаптеры, симуляция, интеграция
+pytest -q                # 272 теста: политики, контур, адаптеры, симуляция, интеграция
 python -m sim            # прогоны симуляции: как ведут себя параметры под нагрузкой
 ruff check . && mypy src tests sim
 ```
