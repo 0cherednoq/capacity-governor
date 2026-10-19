@@ -4,6 +4,7 @@
 """
 
 from capacity.governor import TickPlan, plan_tick
+from capacity.loop import Governor, TickOutcome, TickStatus
 from capacity.policies.max_min_fair import MaxMinFair
 from capacity.policies.reorder_point import ReorderPoint
 from capacity.policies.sequential import Sequential
@@ -21,6 +22,7 @@ __all__ = [
     "Allocation",
     "ConsumerState",
     "EligibleCapacity",
+    "Governor",
     "Hold",
     "MaxMinFair",
     "Recommendation",
@@ -28,7 +30,9 @@ __all__ = [
     "Sequential",
     "Stabilizer",
     "SupplySnapshot",
+    "TickOutcome",
     "TickPlan",
     "TickReport",
+    "TickStatus",
     "plan_tick",
 ]
