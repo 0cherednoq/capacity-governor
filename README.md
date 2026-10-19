@@ -1,8 +1,9 @@
 # capacity-governor
 
 Политика распределения ёмкости дефицитных ресурсов между потребителями и политика
-пополнения ресурса. Политики, слой стабилизации, контур, адаптеры и симуляция
-написаны; состояние по шагам — в
+пополнения ресурса. Готово всё: политики, слой стабилизации, контур, адаптеры,
+симуляция и оба сценария гейта, прогнанные на живых Postgres, Tallyho и Identity Hub.
+Состояние по шагам — в
 [`docs/implementation-progress.md`](docs/implementation-progress.md).
 
 Библиотека отвечает на два вопроса:
@@ -108,8 +109,19 @@ await governor.run(every=timedelta(seconds=5), stop=shutdown)
 ## Как запускать
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev,postgres]"
-pytest                  # 172 теста: политики, контур, адаптеры, прогоны симуляции
+python -m venv .venv && .venv/bin/pip install -e ".[dev,postgres]" asyncpg
+pytest                  # 195 тестов: политики, контур, адаптеры, симуляция, интеграция
 python -m sim            # отчёт по шести прогонам G8
 ruff check . && mypy src tests sim
 ```
+
+Интеграционные прогоны требуют Postgres и пропускаются без него:
+
+```bash
+docker run -d --name capacity-governor-test-pg     -e POSTGRES_PASSWORD=capacity -e POSTGRES_USER=capacity     -e POSTGRES_DB=capacity -p 55444:5432 postgres:16-alpine
+pytest tests/test_integration_postgres.py -q
+```
+
+Прогоны сценариев гейта (`test_integration_tallyho.py`, `test_integration_sequential.py`,
+`test_integration_identity_hub.py`) дополнительно требуют установленных `tallyho` и
+`identity-hub`; без них они тоже пропускаются. `CAPACITY_TEST_DSN` задаёт подключение.

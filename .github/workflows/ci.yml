@@ -8,13 +8,62 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      # Интеграционные тесты адаптера Postgres: без базы они пропускаются, и тогда
+      # непроверенным остаётся именно то, что проверяется только живым сервером —
+      # advisory-лок, upsert и изоляция контуров.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: capacity
+          POSTGRES_PASSWORD: capacity
+          POSTGRES_DB: capacity
+        ports:
+          - 55444:5432
+        options: >-
+          --health-cmd "pg_isready -U capacity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAPACITY_TEST_DSN: postgresql+asyncpg://capacity:capacity@127.0.0.1:55444/capacity
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev,postgres]"
+      - run: pip install -e ".[dev,postgres]" asyncpg
       - run: ruff check .
       - run: mypy src tests sim
       # Политики чистые, seed фиксирован — прогоны симуляции детерминированы (G8).
       - run: pytest -q
+
+  package:
+    # Условие гейта G0: пакет ставится в чистое окружение без зависимостей, а ядро
+    # и адаптеры к сервисам работают без установки самих сервисов.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - run: pip install dist/*.whl
+      - run: |
+          python - <<'PY'
+          from capacity import ConsumerState, MaxMinFair
+          import capacity_adapters.identity_hub, capacity_adapters.tallyho
+
+          grants = MaxMinFair().allocate(
+              30, [ConsumerState("A", 1000), ConsumerState("B", 5)], {}
+          ).grants
+          assert dict(grants) == {"A": 25, "B": 5}, grants
+          try:
+              import capacity_adapters.postgres
+          except ImportError as error:
+              assert "capacity-governor[postgres]" in str(error), error
+          else:
+              raise AssertionError("адаптер Postgres не должен работать без extras")
+          print("пакет собран и проверен")
+          PY

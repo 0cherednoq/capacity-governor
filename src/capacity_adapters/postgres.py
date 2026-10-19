@@ -20,15 +20,20 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from sqlalchemy import (
-    Column,
-    Integer,
-    MetaData,
-    String,
-    Table,
-    text,
-)
-from sqlalchemy.dialects.postgresql import JSONB, insert
+try:
+    from sqlalchemy import (
+        Column,
+        Integer,
+        MetaData,
+        String,
+        Table,
+        text,
+    )
+    from sqlalchemy.dialects.postgresql import JSONB, insert
+except ImportError as error:  # extras не поставлены
+    raise ImportError(
+        "адаптеру Postgres нужна SQLAlchemy: pip install 'capacity-governor[postgres]'"
+    ) from error
 
 from capacity.types import Hold
 
