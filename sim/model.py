@@ -368,6 +368,16 @@ class Simulation:
         return "\n".join(lines)
 
 
+def min_hold_for(config: SimConfig) -> int:
+    """Правило выбора удержания: длительность единицы работы в тактах плюс запас.
+
+    Ровно по длительности работы контур стоит на границе — любое её удлинение роняет
+    его в режим, где окно отбирают раньше, чем работа доходит. Запас в один такт стоит
+    около пятой части записей окон и ничем больше не платится.
+    """
+    return math.ceil(config.check_duration / config.tick) + 1
+
+
 def windows_per_hour(metrics: SimMetrics, config: SimConfig) -> float:
     """Записей окон в час — то, что мёртвая зона обязана держать низким."""
     return metrics.window_writes / math.ceil(config.horizon / 3600)

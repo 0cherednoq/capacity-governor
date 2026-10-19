@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import timedelta
 
-from sim.model import Consumer, SimConfig, SimMetrics, Simulation
+from sim.model import Consumer, SimConfig, SimMetrics, Simulation, min_hold_for
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,7 +20,11 @@ class Scenario:
         return sim, sim.run()
 
 
-BASE = SimConfig()
+_DEFAULTS = SimConfig()
+# Удержание окна по правилу из `min_hold_for`: при такте 5 с и проверке 20 с это 5
+# тактов. Там, где ёмкости хватает всем, оно ни на что не влияет; там, где ёмкость
+# меньше числа потребителей, без него контур не работает вовсе (см. журнал, S11).
+BASE = replace(_DEFAULTS, min_hold_ticks=min_hold_for(_DEFAULTS))
 
 
 def cold_start() -> Simulation:
@@ -76,12 +80,12 @@ def capacity_below_consumers() -> Simulation:
 
     Вопрос: никто не голодает — проверка DRR из G2 на живой модели.
 
-    Удержание (`min_hold_ticks = 5`) здесь не украшение, а условие работоспособности:
-    единица работы длится 20 с при такте 5 с, и окно, которое переезжает каждый такт,
-    потребитель просто не успевает использовать — работа уходит в `defer`, а не
-    выполняется. Величина выбрана прогоном `capacity_below_consumers_sweep`.
+    Удержание здесь не украшение, а условие работоспособности: единица работы длится
+    20 с при такте 5 с, и окно, которое переезжает каждый такт, потребитель просто не
+    успевает использовать — работа уходит в `defer`, а не выполняется. Величина берётся
+    общим правилом `min_hold_for`, подобранным прогоном `capacity_below_consumers_sweep`.
     """
-    return _scarce_capacity(min_hold_ticks=5)
+    return _scarce_capacity(min_hold_ticks=BASE.min_hold_ticks)
 
 
 def capacity_below_consumers_no_hold() -> Simulation:
