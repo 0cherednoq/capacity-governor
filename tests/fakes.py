@@ -97,7 +97,7 @@ class FakeState:
 
 @dataclass(slots=True)
 class FakeOverrides:
-    pins: Mapping[str, int] = field(default_factory=dict)
+    pins: dict[str, int] = field(default_factory=dict)
     is_paused: bool = False
 
     async def pinned(self) -> Mapping[str, int]:
@@ -105,6 +105,15 @@ class FakeOverrides:
 
     async def paused(self) -> bool:
         return self.is_paused
+
+    async def pin(self, consumer_id: str, limit: int) -> None:
+        self.pins[consumer_id] = limit
+
+    async def unpin(self, consumer_id: str) -> None:
+        self.pins.pop(consumer_id, None)
+
+    async def set_paused(self, paused: bool) -> None:
+        self.is_paused = paused
 
 
 @dataclass(slots=True)

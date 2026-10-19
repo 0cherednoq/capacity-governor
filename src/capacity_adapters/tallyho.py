@@ -16,7 +16,15 @@ Tallyho здесь **не импортируется**. Внешнее API оп�
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import (
+    Awaitable,
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
@@ -72,8 +80,29 @@ class BatchPage(Protocol):
     def items(self) -> Sequence[BatchInfo]: ...
 
 
+class TaskCall(Protocol):
+    def opts(self, *, key: str | None = ..., **options: object) -> TaskCall: ...
+
+
+class BatchBuilder(Protocol):
+    async def add_calls(self, calls: Iterable[TaskCall]) -> None: ...
+
+
 class TallyhoClient(Protocol):
     def handle(self, batch_id: UUID) -> BatchHandle: ...
+
+    def call(self, fn: Callable[..., Any], *args: Any) -> TaskCall: ...
+
+    def batch(
+        self,
+        kind: str,
+        *,
+        key: str | None = ...,
+        seal: bool = ...,
+        max_in_flight: int | None = ...,
+    ) -> AbstractAsyncContextManager[BatchBuilder]: ...
+
+    async def find(self, kind: str, key: str) -> BatchHandle: ...
 
     async def list_batches(
         self,
@@ -214,16 +243,55 @@ class TallyhoOrderLedger:
 class TallyhoReplenisher:
     """`Replenisher`: заказ — это батч регистраций (G4, §8.3 документа).
 
-    Идемпотентность держится на двух ключах: ключ батча — `replenish:{window_start}`,
-    то есть начало **бюджетного** окна, а не минута такта (иначе бюджет считается по
-    одному окну, а дедупликация идёт по другому), и ключ каждого слота — `slot:{i}`,
-    который ловится уникальным индексом `(batch_id, key)`. Повторный такт в том же
-    окне допишет только недостающие слоты.
+    Идемпотентность держится на двух ключах, и оба здесь не случайны:
+
+    * ключ батча — тот `window_key`, что дала политика, то есть
+      `replenish:{window_start}` по началу **бюджетного** окна, а не по минуте такта.
+      Иначе бюджет считался бы по одному окну, а дедупликация шла бы по другому;
+    * ключ каждого слота — `slot:{i}`, который ловится уникальным индексом
+      `(batch_id, key) WHERE key IS NOT NULL`.
+
+    Поэтому повторный такт в том же окне допишет ровно недостающие слоты: батч
+    находится по ключу, уже существующие слоты отсеиваются индексом. Батч создаётся с
+    `seal=False` — вход остаётся открытым до конца окна, ведь следующий такт может
+    добавить ещё.
+
+    `register` — задача регистрации одного ресурса, её пишет проект: что именно значит
+    «завести аккаунт», библиотека не знает.
     """
 
-    submit: Callable[[str, int], Awaitable[None]]
+    client: TallyhoClient
+    kind: str
+    register: Callable[..., Awaitable[object]]
+    max_in_flight: int | None = None
 
     async def order(self, count: int, window_key: str) -> None:
         if count <= 0:
             return
-        await self.submit(window_key, count)
+        existing = await self._slots_in(window_key)
+        calls = [
+            self.client.call(self.register, window_key, index).opts(
+                key=f"slot:{index}"
+            )
+            for index in range(existing, existing + count)
+        ]
+        async with self.client.batch(
+            self.kind,
+            key=window_key,
+            seal=False,
+            max_in_flight=self.max_in_flight,
+        ) as batch:
+            await batch.add_calls(calls)
+
+    async def _slots_in(self, window_key: str) -> int:
+        """Сколько слотов уже заказано в этом окне.
+
+        Нумерация продолжается с этого места, иначе повторный заказ попал бы на уже
+        занятые ключи `slot:{i}` и был бы отсеян индексом целиком — бюджет списался
+        бы, а работа не появилась.
+        """
+        try:
+            handle = await self.client.find(self.kind, window_key)
+        except Exception:
+            return 0
+        return (await handle.view()).progress.found

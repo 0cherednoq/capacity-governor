@@ -22,6 +22,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -41,7 +42,12 @@ from capacity_adapters.postgres import (
     PostgresStateStore,
     PostgresTickScope,
 )
-from capacity_adapters.tallyho import TallyhoConsumers, TallyhoWindows
+from capacity_adapters.tallyho import (
+    TallyhoConsumers,
+    TallyhoOrderLedger,
+    TallyhoReplenisher,
+    TallyhoWindows,
+)
 
 DSN = os.environ.get(
     "CAPACITY_TEST_DSN",
@@ -98,7 +104,7 @@ async def engine() -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
-async def th(engine: AsyncEngine) -> AsyncIterator[tuple[object, object]]:
+async def th(engine: AsyncEngine) -> AsyncIterator[tuple[Any, Any]]:
     # Схема Tallyho пересоздаётся, состояние контура чистится: иначе батчи прошлого
     # прогона остаются в базе с открытыми окнами и `drain()` выполняет чужую работу,
     # а журнал окон помнит выставленное тогда и решает, что менять нечего.
@@ -119,21 +125,21 @@ async def th(engine: AsyncEngine) -> AsyncIterator[tuple[object, object]]:
         await client.aclose()
 
 
-async def make_batch(client: object, kind: str, domains: list[str]) -> UUID:
+async def make_batch(client: Any, kind: str, domains: list[str]) -> UUID:
     """Батч проверки доменов, созданный с закрытым окном.
 
     Окно задаётся при создании, а не после: до коммита батча его ещё нет в базе, и
     `set_max_in_flight` на незакоммиченном батче падает с `BatchPurged`. Для контура
     это и есть правильный порядок — работа ставится закрытой, окно открывает он.
     """
-    async with client.batch(kind, max_in_flight=0) as batch:  # type: ignore[attr-defined]
+    async with client.batch(kind, max_in_flight=0) as batch:
         await batch.map(check_domain, domains)
     return batch.handle.id  # type: ignore[no-any-return]
 
 
 def build_governor(
     engine: AsyncEngine,
-    client: object,
+    client: Any,
     batches: Mapping[str, UUID],
     capacity: int,
     clock: Clock,
@@ -149,9 +155,9 @@ def build_governor(
     governor = Governor(
         scope=scope,
         capacity_source=FixedCapacity(capacity),
-        registry=TallyhoConsumers(client, batch_map),  # type: ignore[arg-type]
+        registry=TallyhoConsumers(client, batch_map),
         windows=TallyhoWindows(
-            client,  # type: ignore[arg-type]
+            client,
             resolve=lambda consumer_id: batches[consumer_id],
             journal=_JournalOverState(state),
             session_provider=scope.session,
@@ -182,7 +188,7 @@ class _JournalOverState:
 
 
 async def test_closed_window_stops_domain_checking(
-    engine: AsyncEngine, th: tuple[object, object]
+    engine: AsyncEngine, th: tuple[Any, Any]
 ) -> None:
     """Ёмкости нет — работа не идёт, хотя задачи поставлены и брокер работает."""
     client, broker = th
@@ -192,13 +198,13 @@ async def test_closed_window_stops_domain_checking(
     )
 
     await governor.tick()
-    await broker.drain()  # type: ignore[attr-defined]
+    await broker.drain()
 
     assert checked == []
 
 
 async def test_capacity_opens_the_window_and_work_goes_through(
-    engine: AsyncEngine, th: tuple[object, object]
+    engine: AsyncEngine, th: tuple[Any, Any]
 ) -> None:
     """Ёмкость появилась — контур открыл окно, и проверка доменов пошла."""
     client, broker = th
@@ -209,7 +215,7 @@ async def test_capacity_opens_the_window_and_work_goes_through(
     )
 
     outcome = await governor.tick()
-    await broker.drain()  # type: ignore[attr-defined]
+    await broker.drain()
 
     assert outcome.plan is not None
     assert outcome.plan.allocation.grants == {"run": 3}
@@ -217,7 +223,7 @@ async def test_capacity_opens_the_window_and_work_goes_through(
 
 
 async def test_demand_is_read_from_live_progress(
-    engine: AsyncEngine, th: tuple[object, object]
+    engine: AsyncEngine, th: tuple[Any, Any]
 ) -> None:
     """Спрос берётся из настоящих счётчиков батча, а не из нашего представления о них."""
     client, broker = th
@@ -227,7 +233,7 @@ async def test_demand_is_read_from_live_progress(
     )
 
     first = await governor.tick()
-    await broker.drain()  # type: ignore[attr-defined]
+    await broker.drain()
     clock_later = Clock()
     clock_later.tick()
     governor.clock = clock_later
@@ -241,7 +247,7 @@ async def test_demand_is_read_from_live_progress(
 
 
 async def test_scarce_capacity_rotates_between_batches(
-    engine: AsyncEngine, th: tuple[object, object]
+    engine: AsyncEngine, th: tuple[Any, Any]
 ) -> None:
     """Ёмкость 1 на два батча: окно ходит между ними по дефицитам, никто не забыт."""
     client, _ = th
@@ -270,7 +276,7 @@ async def test_scarce_capacity_rotates_between_batches(
 
 
 async def test_state_is_shared_between_loop_restarts(
-    engine: AsyncEngine, th: tuple[object, object]
+    engine: AsyncEngine, th: tuple[Any, Any]
 ) -> None:
     """Контур перезапущен — очередь не сбрасывается: она лежит в базе, а не в процессе."""
     client, _ = th
@@ -295,3 +301,99 @@ async def test_state_is_shared_between_loop_restarts(
     served_first = {cid for cid, g in first_grants.allocation.grants.items() if g}
     served_second = {cid for cid, g in second_grants.allocation.grants.items() if g}
     assert served_first != served_second
+
+
+# --- пополнение ---------------------------------------------------------------------
+
+registered: list[tuple[str, int]] = []
+
+
+async def register_account(window_key: str, slot: int) -> None:
+    """Регистрация одного ресурса. В бою это работа библиотеки авторизации."""
+    registered.append((window_key, slot))
+    tallyho.item.ok("registered")
+
+
+async def test_replenishment_order_is_a_real_batch_of_slots(
+    th: tuple[Any, Any],
+) -> None:
+    """Заказ ставится батчем со слотами и исполняется (G4, §8.3)."""
+    client, broker = th
+    registered.clear()
+    replenisher = TallyhoReplenisher(
+        client, kind="registration", register=register_account
+    )
+
+    await replenisher.order(3, "replenish:2026-10-19T16:00:00+00:00")
+    await broker.drain()
+
+    assert sorted(slot for _, slot in registered) == [0, 1, 2]
+
+
+async def test_repeated_order_in_the_same_window_adds_only_what_is_missing(
+    th: tuple[Any, Any],
+) -> None:
+    """Повторный такт того же окна не дублирует слоты и не теряет новые.
+
+    Это главное свойство схемы §8.3, и проверить его можно только живьём: ключ батча
+    по бюджетному окну плюс уникальный индекс `(batch_id, key)` на слотах.
+    """
+    client, broker = th
+    registered.clear()
+    window = "replenish:2026-10-19T17:00:00+00:00"
+    replenisher = TallyhoReplenisher(
+        client, kind="registration", register=register_account
+    )
+
+    await replenisher.order(2, window)
+    await replenisher.order(2, window)
+    await broker.drain()
+
+    assert sorted(slot for _, slot in registered) == [0, 1, 2, 3]
+    assert {key for key, _ in registered} == {window}
+
+
+async def test_order_in_a_new_window_starts_its_own_batch(
+    th: tuple[Any, Any],
+) -> None:
+    """Новое бюджетное окно — новый батч: бюджет считается по тому же окну, что ключ."""
+    client, broker = th
+    registered.clear()
+    replenisher = TallyhoReplenisher(
+        client, kind="registration", register=register_account
+    )
+
+    await replenisher.order(1, "replenish:2026-10-19T18:00:00+00:00")
+    await replenisher.order(1, "replenish:2026-10-19T19:00:00+00:00")
+    await broker.drain()
+
+    assert sorted(registered) == [
+        ("replenish:2026-10-19T18:00:00+00:00", 0),
+        ("replenish:2026-10-19T19:00:00+00:00", 0),
+    ]
+
+
+async def test_ledger_counts_the_orders_it_placed(th: tuple[Any, Any]) -> None:
+    """Журнал бюджета читает собственные батчи: заказ виден политике следующим тактом."""
+    client, broker = th
+    registered.clear()
+    clock = Clock()
+    replenisher = TallyhoReplenisher(
+        client, kind="registration", register=register_account
+    )
+    ledger = TallyhoOrderLedger(
+        client,
+        kinds=["registration"],
+        window=timedelta(hours=1),
+        now=clock.now,
+        cache_for=timedelta(0),
+    )
+
+    await replenisher.order(4, "replenish:2026-10-19T16:00:00+00:00")
+    in_window, in_progress = await ledger.counts()
+    await broker.drain()
+    after_window, after_progress = await ledger.counts()
+
+    assert (in_window, in_progress) == (4, 4)
+    # Работа сделана: бюджет окна израсходован, в работе ничего не осталось.
+    assert (after_window, after_progress) == (4, 0)

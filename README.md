@@ -9,8 +9,9 @@
 Библиотека отвечает на два вопроса:
 
 * **кому сколько ресурса сейчас** — `MaxMinFair` (общий пул: веса, гарантированный
-  минимум, потолок, burst, round robin между тактами), `Sequential` (выделенный пул:
-  последовательный расход);
+  минимум, потолок, удержание окна, round robin между тактами), `Sequential`
+  (выделенный пул: последовательный расход), `StaticCeiling` (статичный потолок без
+  контура);
 * **когда пополнять** — `ReorderPoint`: политика запасов (s, S) плюс правило нехватки
   под спрос плюс бюджет заказов.
 
@@ -56,7 +57,7 @@ robin, `ReorderPoint`, мёртвая зона, симуляция SimPy). Он�
 src/capacity/            ядро фазы A: ни одного импорта проекта, только stdlib
   types.py               ConsumerState, Allocation, EligibleCapacity, SupplySnapshot
   ports.py               Protocol'ы: источники ёмкости и запаса, окна, дефициты, пины
-  policies/              MaxMinFair (DRR), Sequential, ReorderPoint
+  policies/              MaxMinFair (DRR), Sequential, StaticCeiling, ReorderPoint
   stabilize.py           мёртвая зона и выдержка при уменьшении окна
   governor.py            plan_tick: чистая часть такта (pin, pause, заказ, метрики)
   loop.py                Governor: порядок такта, лидерство, kick с дебаунсом, цикл
@@ -102,6 +103,12 @@ governor = Governor(
 await governor.run(every=timedelta(seconds=5), stop=shutdown)
 ```
 
+Оператор вмешивается командами контура: `await governor.pin("batch-7", 2)` держит
+потребителю окно, `unpin` возвращает его в раздачу, `pause` оставляет все окна как
+есть, не переставая считать раздачу, `resume` возвращает управление. Команды пишутся в
+БД своей транзакцией и действуют со следующего такта, независимо от того, кто сейчас
+лидер.
+
 Две таблицы (`capacity_governor_state`, `capacity_governor_override`) описаны в
 `capacity_adapters.postgres.METADATA` — миграция за проектом. Рабочий пример сборки
 целиком лежит в `tests/test_wiring.py`.
@@ -110,7 +117,7 @@ await governor.run(every=timedelta(seconds=5), stop=shutdown)
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev,postgres]" asyncpg
-pytest                  # 195 тестов: политики, контур, адаптеры, симуляция, интеграция
+pytest                  # 225 тестов: политики, контур, адаптеры, симуляция, интеграция
 python -m sim            # отчёт по шести прогонам G8
 ruff check . && mypy src tests sim
 ```

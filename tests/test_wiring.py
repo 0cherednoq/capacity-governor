@@ -72,11 +72,26 @@ class DictState:
 
 
 class NoOverrides:
+    """Переопределений нет. В проекте это `PostgresOverrideStore`."""
+
     async def pinned(self) -> Mapping[str, int]:
         return {}
 
     async def paused(self) -> bool:
         return False
+
+    async def pin(self, consumer_id: str, limit: int) -> None:
+        raise NotImplementedError
+
+    async def unpin(self, consumer_id: str) -> None:
+        raise NotImplementedError
+
+    async def set_paused(self, paused: bool) -> None:
+        raise NotImplementedError
+
+
+async def register_account(window_key: str, slot: int) -> None:
+    """Задача регистрации ресурса: её пишет проект."""
 
 
 class PassthroughScope:
@@ -104,7 +119,6 @@ def wire(
     identities = FakeIdentities({_key(ELIGIBLE): eligible})
     clock = FixedClock(NOW)
     journal = DictJournal()
-    orders: list[tuple[str, int]] = []
 
     async def batches() -> Mapping[str, UUID]:
         return {"domains": batch}
@@ -114,9 +128,6 @@ def wire(
 
     async def demand_units() -> int:
         return demand
-
-    async def submit(window_key: str, count: int) -> None:
-        orders.append((window_key, count))
 
     capacity_source = IdentityHubCapacity(
         identities,
@@ -144,13 +155,14 @@ def wire(
             credits_per_resource=100,
         ),
         reorder=ReorderPoint(target=50, reorder_ratio=0.2, max_per_window=20),
-        replenisher=TallyhoReplenisher(submit),
+        replenisher=TallyhoReplenisher(
+            tallyho, kind="registration", register=register_account
+        ),
         min_tick_interval=timedelta(seconds=TICK),
     )
     return governor, {
         "tallyho": tallyho,
         "journal": journal,
-        "orders": orders,
         "clock": clock,
         "batch": batch,
     }
@@ -185,8 +197,13 @@ async def test_empty_pool_closes_the_window_and_orders_replenishment() -> None:
 
     await governor.tick()
 
-    assert [limit for _, limit, _, _ in parts["tallyho"].applied] == [0]  # type: ignore[attr-defined]
-    assert parts["orders"] == [("replenish:2026-10-19T15:00:00+00:00", 20)]
+    tallyho = parts["tallyho"]
+    assert [limit for _, limit, _, _ in tallyho.applied] == [0]  # type: ignore[attr-defined]
+    # Заказ — настоящий батч регистраций с ключом бюджетного окна и слотами (§8.3).
+    assert tallyho.batches == [  # type: ignore[attr-defined]
+        ("registration", "replenish:2026-10-19T15:00:00+00:00", False, None)
+    ]
+    assert tallyho.added[:3] == ["slot:0", "slot:1", "slot:2"]  # type: ignore[attr-defined]
 
 
 async def test_nothing_happens_without_leadership() -> None:

@@ -135,6 +135,40 @@ class Governor:
             await self.observer.observe(plan.report)
         return TickOutcome(status=TickStatus.RAN, plan=plan, paused=paused)
 
+    async def pin(self, consumer_id: str, limit: int) -> None:
+        """Выключатель оператора: держать потребителю это окно, пока не отпустят (G7).
+
+        Контур перестаёт писать окно пина, но по-прежнему вычитает его потребление из
+        ёмкости — иначе пин выдал бы остальным ресурсы, которых нет. Поднять окно выше
+        собственного потолка потребителя пин не может.
+        """
+        if limit < 0:
+            raise ValueError("limit < 0")
+        await self._require_overrides().pin(consumer_id, limit)
+
+    async def unpin(self, consumer_id: str) -> None:
+        """Вернуть потребителя в раздачу. Его окно пересчитается следующим тактом."""
+        await self._require_overrides().unpin(consumer_id)
+
+    async def pause(self) -> None:
+        """Контур перестаёт писать окна вовсе, оставляя текущие значения (G7).
+
+        Нужно, чтобы во время инцидента можно было ответить на вопрос «это контур
+        дёргает окна или нет». Раздача продолжает считаться, и метрики продолжают
+        показывать, что политика предлагает; пополнение пауза не затрагивает.
+        """
+        await self._require_overrides().set_paused(True)
+
+    async def resume(self) -> None:
+        await self._require_overrides().set_paused(False)
+
+    def _require_overrides(self) -> OverrideStore:
+        if self.overrides is None:
+            raise RuntimeError(
+                "контур собран без OverrideStore: переопределения оператора некуда писать"
+            )
+        return self.overrides
+
     async def kick(self) -> TickOutcome:
         """Пересчитать сейчас — по событию ёмкости или проекта.
 

@@ -112,11 +112,25 @@ class StateStore(Protocol):
 
 @runtime_checkable
 class OverrideStore(Protocol):
-    """Ручное переопределение: `pin`/`pause` живут в БД, не в памяти процесса (G7)."""
+    """Ручное переопределение: `pin`/`pause` живут в БД, не в памяти процесса (G7).
+
+    Запись здесь такая же обязательная часть, как чтение: автоматический контур, который
+    может поставить всем окно 0, обязан иметь выключатель, а оператору во время инцидента
+    некогда разбираться, в какую таблицу писать руками.
+
+    Эти методы вызываются **вне** транзакции такта: оператор не ждёт, пока контур
+    закончит пересчёт, а его правка подхватывается следующим тактом.
+    """
 
     async def pinned(self) -> Mapping[str, int]: ...
 
     async def paused(self) -> bool: ...
+
+    async def pin(self, consumer_id: str, limit: int) -> None: ...
+
+    async def unpin(self, consumer_id: str) -> None: ...
+
+    async def set_paused(self, paused: bool) -> None: ...
 
 
 @runtime_checkable

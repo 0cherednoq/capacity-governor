@@ -192,11 +192,59 @@ class PostgresOverrideStore:
 
     Состояние в БД, не в памяти процесса: лидер меняется между тактами, а выключатель
     обязан действовать независимо от того, кто сейчас ведёт контур.
+
+    Чтение идёт в транзакции такта, запись — в своей: оператор нажимает выключатель
+    тогда, когда ему нужно, а не когда контур освободит лок. Поэтому для записи нужен
+    собственный доступ к сессиям, `session_scope`.
     """
 
     scope_provider: PostgresTickScope
     scope: str = "default"
+    session_scope: SessionScope | None = None
     _cache: tuple[int, list[Any]] | None = field(default=None, init=False)
+
+    async def pin(self, consumer_id: str, limit: int) -> None:
+        if consumer_id == PAUSE_ROW:
+            raise ValueError(f"{PAUSE_ROW} — служебная строка паузы, не потребитель")
+        await self._write_override(consumer_id, limit)
+
+    async def unpin(self, consumer_id: str) -> None:
+        await self._delete_override(consumer_id)
+
+    async def set_paused(self, paused: bool) -> None:
+        if paused:
+            await self._write_override(PAUSE_ROW, None)
+        else:
+            await self._delete_override(PAUSE_ROW)
+
+    async def _write_override(self, consumer_id: str, limit: int | None) -> None:
+        statement = insert(GOVERNOR_OVERRIDE).values(
+            scope=self.scope, consumer_id=consumer_id, window_limit=limit
+        )
+        await self._execute_outside_tick(
+            statement.on_conflict_do_update(
+                index_elements=[
+                    GOVERNOR_OVERRIDE.c.scope,
+                    GOVERNOR_OVERRIDE.c.consumer_id,
+                ],
+                set_={"window_limit": statement.excluded.window_limit},
+            )
+        )
+
+    async def _delete_override(self, consumer_id: str) -> None:
+        await self._execute_outside_tick(
+            GOVERNOR_OVERRIDE.delete().where(
+                (GOVERNOR_OVERRIDE.c.scope == self.scope)
+                & (GOVERNOR_OVERRIDE.c.consumer_id == consumer_id)
+            )
+        )
+
+    async def _execute_outside_tick(self, statement: Any) -> None:
+        """Записать переопределение в своей транзакции, не ожидая такта."""
+        scope = self.session_scope or self.scope_provider.session_scope
+        async with scope() as session:
+            await session.execute(statement)
+        self._cache = None
 
     async def pinned(self) -> Mapping[str, int]:
         rows = await self._rows()

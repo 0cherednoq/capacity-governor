@@ -66,6 +66,20 @@ def scope_for(engine: AsyncEngine, name: str) -> PostgresTickScope:
     return PostgresTickScope(session_scope=maker.begin, scope=name)
 
 
+def overrides_for(
+    engine: AsyncEngine, name: str
+) -> tuple[PostgresOverrideStore, PostgresTickScope]:
+    """Хранилище переопределений и такт, в котором контур его читает.
+
+    Чтение идёт в транзакции такта, поэтому store и scope должны быть одной парой:
+    store берёт сессию у своего `scope_provider`, а не у любого другого контура.
+    """
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    scope = PostgresTickScope(session_scope=maker.begin, scope=name)
+    store = PostgresOverrideStore(scope, scope=name, session_scope=maker.begin)
+    return store, scope
+
+
 # --- лидерство ----------------------------------------------------------------------
 
 
@@ -209,6 +223,53 @@ async def test_operator_pin_and_pause_are_visible_to_the_next_tick(
 
     assert pins == {"c0": 3}
     assert paused is True
+
+
+async def test_operator_commands_write_without_waiting_for_the_tick(
+    engine: AsyncEngine,
+) -> None:
+    """Оператор не ждёт, пока контур отпустит лок: запись идёт своей транзакцией (G7)."""
+    store, scope = overrides_for(engine, "commands")
+
+    async with scope.lead() as leading:
+        assert leading is True  # контур держит лок прямо сейчас
+        await store.pin("c0", 4)
+        await store.set_paused(True)
+
+    async with scope.lead():
+        assert await store.pinned() == {"c0": 4}
+        assert await store.paused() is True
+
+
+async def test_pin_is_idempotent_and_updatable(engine: AsyncEngine) -> None:
+    store, scope = overrides_for(engine, "commands")
+
+    await store.pin("c0", 2)
+    await store.pin("c0", 7)
+
+    async with scope.lead():
+        assert await store.pinned() == {"c0": 7}
+
+
+async def test_unpin_and_resume_remove_the_rows(engine: AsyncEngine) -> None:
+    store, scope = overrides_for(engine, "commands")
+
+    await store.pin("c0", 2)
+    await store.set_paused(True)
+    await store.unpin("c0")
+    await store.set_paused(False)
+
+    async with scope.lead():
+        assert await store.pinned() == {}
+        assert await store.paused() is False
+
+
+async def test_pause_row_is_not_a_consumer(engine: AsyncEngine) -> None:
+    """Служебную строку паузы нельзя занять потребителем — иначе пауза станет пином."""
+    store, _ = overrides_for(engine, "commands")
+
+    with pytest.raises(ValueError, match="служебная строка"):
+        await store.pin(PAUSE_ROW, 1)
 
 
 async def test_unpausing_is_deleting_the_row(engine: AsyncEngine) -> None:

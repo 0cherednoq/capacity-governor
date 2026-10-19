@@ -8,6 +8,7 @@ from capacity.loop import Governor, TickOutcome, TickStatus
 from capacity.policies.max_min_fair import MaxMinFair
 from capacity.policies.reorder_point import ReorderPoint
 from capacity.policies.sequential import Sequential
+from capacity.policies.static_ceiling import StaticCeiling
 from capacity.stabilize import Recommendation, Stabilizer
 from capacity.types import (
     Allocation,
@@ -29,6 +30,7 @@ __all__ = [
     "ReorderPoint",
     "Sequential",
     "Stabilizer",
+    "StaticCeiling",
     "SupplySnapshot",
     "TickOutcome",
     "TickPlan",
