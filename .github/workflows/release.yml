@@ -41,7 +41,7 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev,postgres]" asyncpg
       - run: ruff check .
-      - run: mypy src tests sim
+      - run: mypy src tests sim examples
       - run: pytest -q
 
   build:
