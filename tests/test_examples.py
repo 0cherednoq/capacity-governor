@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -153,16 +154,55 @@ def test_every_example_is_linked_from_the_use_cases() -> None:
     assert missing == []
 
 
-def test_readme_links_resolve() -> None:
-    """Ссылки README ведут на существующие файлы: битая ссылка в нём дороже всего."""
-    root = README.parent
-    text = README.read_text(encoding="utf-8")
-    targets = [
-        part.split(")")[0]
-        for part in text.split("](")[1:]
-        if not part.startswith(("http://", "https://", "#"))
-    ]
+def _anchors(path: Path) -> set[str]:
+    """Якоря заголовков так, как их строит GitHub: нижний регистр, пробелы в дефисы."""
+    found: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("#"):
+            title = line.lstrip("#").strip()
+            slug = re.sub(r"[^\w\s-]", "", title.lower(), flags=re.UNICODE)
+            found.add(re.sub(r"\s+", "-", slug.strip()))
+    return found
 
-    broken = [t for t in targets if not (root / t.split("#")[0]).exists()]
+
+def test_documentation_links_resolve() -> None:
+    """Все локальные ссылки и якоря в документах ведут куда надо.
+
+    Битая ссылка в README дороже любой другой опечатки: читатель приходит по ней
+    первым делом. Проверяются и якоря — заголовок переименовали, ссылка осталась.
+    """
+    root = README.parent
+    documents = [README, root / "CHANGELOG.md", *sorted((root / "docs").glob("*.md"))]
+    broken: list[str] = []
+
+    for document in documents:
+        for target in re.findall(r"\]\(([^)]+)\)", document.read_text(encoding="utf-8")):
+            if target.startswith(("http://", "https://")):
+                continue
+            file_part, _, anchor = target.partition("#")
+            destination = (document.parent / file_part) if file_part else document
+            if not destination.exists():
+                broken.append(f"{document.name}: нет файла {target}")
+            elif anchor and destination.suffix == ".md" and anchor not in _anchors(
+                destination
+            ):
+                broken.append(f"{document.name}: нет якоря {target}")
 
     assert broken == []
+
+
+def test_readme_badges_point_at_this_project() -> None:
+    """Бейджи взяты у этого проекта, а не скопированы от соседнего.
+
+    Сами картинки в тесте не запрашиваются: сеть в CI для этого не нужна, а подменить
+    имя пакета в ссылке — ровно та ошибка, которую ловит сравнение с `pyproject.toml`.
+    """
+    text = README.read_text(encoding="utf-8")
+    pyproject = (README.parent / "pyproject.toml").read_text(encoding="utf-8")
+    name = re.search(r'^name = "([^"]+)"', pyproject, re.MULTILINE)
+    assert name is not None
+    badges = re.findall(r"!\[[^\]]*\]\((https://[^)\s]+)\)", text)
+
+    assert len(badges) == 4
+    for badge in badges:
+        assert name.group(1) in badge, badge
