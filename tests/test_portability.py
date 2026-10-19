@@ -54,6 +54,38 @@ def test_core_does_not_import_the_simulation() -> None:
         assert "sim" not in imported_roots(module)
 
 
+def test_core_does_not_import_the_adapters() -> None:
+    """Зависимость только в одну сторону: адаптеры знают ядро, ядро о них не знает."""
+    for module in core_modules():
+        assert "capacity_adapters" not in imported_roots(module)
+
+
+def test_adapters_keep_their_dependencies_declared() -> None:
+    """Внешние пакеты в адаптерах — только то, что объявлено в extras.
+
+    Адаптеры к Tallyho и Identity Hub написаны против публичных сигнатур и ничего не
+    импортируют: иначе их нельзя было бы ни типизировать, ни проверить без установки
+    обоих сервисов. Настоящая зависимость одна — SQLAlchemy в `postgres`.
+    """
+    adapters = CORE.parent / "capacity_adapters"
+    allowed = ALLOWED_ROOTS | {"capacity_adapters", "sqlalchemy"}
+    offenders = {
+        module.name: sorted(imported_roots(module) - allowed)
+        for module in sorted(adapters.rglob("*.py"))
+    }
+
+    assert {name: roots for name, roots in offenders.items() if roots} == {}
+
+
+def test_only_the_postgres_adapter_needs_sqlalchemy() -> None:
+    """Проект без Postgres ставит пакет без extras и берёт только нужные адаптеры."""
+    adapters = CORE.parent / "capacity_adapters"
+    for module in sorted(adapters.rglob("*.py")):
+        if module.name == "postgres.py":
+            continue
+        assert "sqlalchemy" not in imported_roots(module), module.name
+
+
 def test_runtime_dependencies_are_empty() -> None:
     """У пакета нет зависимостей времени выполнения — иначе перенос тянет их за собой."""
     pyproject = (CORE.parent.parent / "pyproject.toml").read_text(encoding="utf-8")

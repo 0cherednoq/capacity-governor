@@ -11,10 +11,25 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "simpy>=4.1", "ruff>=0.6", "mypy>=1.11"]
+# Ядру (`capacity/`) зависимости не нужны ни одной — это условие гейта G0 и оно
+# проверяется тестом. Всё, что ниже, нужно только адаптерам и разработке.
+postgres = ["sqlalchemy>=2"]
+# Адаптеры к Tallyho и Identity Hub написаны против публичных сигнатур и этих пакетов
+# не импортируют, поэтому extras здесь — объявление совместимости для проекта, который
+# ставит и то и другое вместе.
+tallyho = ["tallyho>=0.0.1"]
+identity-hub = ["identity-hub>=1.0.0a4"]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "simpy>=4.1",
+    "sqlalchemy>=2",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/capacity"]
+packages = ["src/capacity", "src/capacity_adapters"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
