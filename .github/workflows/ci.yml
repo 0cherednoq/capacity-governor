@@ -35,8 +35,54 @@ jobs:
       - run: pip install -e ".[dev,postgres]" asyncpg
       - run: ruff check .
       - run: mypy src tests sim examples
-      # Политики чистые, seed фиксирован — прогоны симуляции детерминированы (G8).
+      # Политики чистые, seed фиксирован — прогоны симуляции детерминированы.
       - run: pytest -q
+
+  neighbours:
+    # Интеграция против соседей: по релизу и по main. Без этой работы расхождение с
+    # опубликованной версией Tallyho всплывает только у того, кто поставит пакет.
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.ref == 'main' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [release, main]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: capacity
+          POSTGRES_PASSWORD: capacity
+          POSTGRES_DB: capacity
+        ports:
+          - 55444:5432
+        options: >-
+          --health-cmd "pg_isready -U capacity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAPACITY_TEST_DSN: postgresql+asyncpg://capacity:capacity@127.0.0.1:55444/capacity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,postgres]" asyncpg
+      - name: Поставить Tallyho и Identity Hub
+        run: |
+          if [ "${{ matrix.ref }}" = "release" ]; then
+            # Extras объявляют совместимость — проверяем ровно её.
+            pip install -e ".[tallyho,identity-hub]" || echo "релиза с нужным API ещё нет"
+          else
+            pip install "tallyho @ git+https://github.com/0cherednoq/tallyho@main" || true
+            pip install "identity-hub[postgres,alembic] @ git+https://github.com/0cherednoq/identity-hub@main" || true
+          fi
+          # Identity Hub без alembic не мигрирует: его тесты упадут на импорте.
+          pip install "identity-hub[postgres,alembic]" alembic || true
+      - name: Что установлено
+        run: pip list | grep -Ei "tallyho|identity-hub" || echo "соседи не установлены — их тесты пропустятся"
+      - run: pytest -q tests/test_integration_tallyho.py tests/test_integration_sequential.py tests/test_integration_identity_hub.py
 
   package:
     # Условие гейта G0: пакет ставится в чистое окружение без зависимостей, а ядро

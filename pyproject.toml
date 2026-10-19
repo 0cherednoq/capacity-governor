@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "capacity-governor"
-version = "0.1.0"
+version = "0.2.0"
 description = "Capacity allocation and replenishment policies for scarce resources: max-min fair sharing, sequential drain and (s, S) reordering."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -50,8 +50,12 @@ postgres = ["sqlalchemy[asyncio]>=2"]
 # Адаптеры к Tallyho и Identity Hub написаны против публичных сигнатур и этих пакетов
 # не импортируют, поэтому extras здесь — объявление совместимости для проекта, который
 # ставит и то и другое вместе.
-tallyho = ["tallyho>=0.0.1"]
-identity-hub = ["identity-hub>=1.0.0a4"]
+# Адаптеру нужен `th.demand()` и окно, которое можно задать при создании батча.
+# В опубликованной 0.0.1 этого нет, поэтому она исключена: с ней адаптер падает на
+# `max_in_flight=0`. Ограничение поднимется до точной версии, как только она выйдет.
+tallyho = ["tallyho>0.0.1"]
+# `Pool.eligible_count()` появился в 1.0.0a5.
+identity-hub = ["identity-hub>=1.0.0a5"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",

@@ -76,7 +76,7 @@ def overrides_for(
     """
     maker = async_sessionmaker(engine, expire_on_commit=False)
     scope = PostgresTickScope(session_scope=maker.begin, scope=name)
-    store = PostgresOverrideStore(scope, scope=name, session_scope=maker.begin)
+    store = PostgresOverrideStore(scope, session_scope=maker.begin)
     return store, scope
 
 
@@ -126,7 +126,7 @@ async def test_different_scopes_do_not_block_each_other(engine: AsyncEngine) -> 
 async def test_state_round_trip_through_the_database(engine: AsyncEngine) -> None:
     """Дефициты и удержания переживают такт: лидер может смениться между ними."""
     scope = scope_for(engine, "state-roundtrip")
-    store = PostgresStateStore(scope, scope="state-roundtrip")
+    store = PostgresStateStore(scope)
 
     async with scope.lead():
         await store.save({"c0": 2, "c1": 0}, {"c0": Hold(amount=1, ticks_left=4)})
@@ -141,7 +141,7 @@ async def test_state_round_trip_through_the_database(engine: AsyncEngine) -> Non
 async def test_repeated_tick_overwrites_instead_of_failing(engine: AsyncEngine) -> None:
     """Повтор такта не должен падать на дубликате ключа — отсюда upsert."""
     scope = scope_for(engine, "state-upsert")
-    store = PostgresStateStore(scope, scope="state-upsert")
+    store = PostgresStateStore(scope)
 
     async with scope.lead():
         await store.save({"c0": 1}, {})
@@ -153,24 +153,11 @@ async def test_repeated_tick_overwrites_instead_of_failing(engine: AsyncEngine) 
     assert deficits == {"c0": 5}
 
 
-async def test_window_journal_survives_the_tick(engine: AsyncEngine) -> None:
-    """Текущее окно у Tallyho не прочитать, поэтому его помнит база контура."""
-    scope = scope_for(engine, "window-journal")
-    store = PostgresStateStore(scope, scope="window-journal")
-
-    async with scope.lead():
-        await store.save_windows({"c0": 7, "c1": 0})
-    async with scope.lead():
-        windows = await store.load_windows()
-
-    assert windows == {"c0": 7, "c1": 0}
-
-
 async def test_state_of_two_loops_does_not_mix(engine: AsyncEngine) -> None:
     domains = scope_for(engine, "domains")
     mailing = scope_for(engine, "mailing")
-    domains_state = PostgresStateStore(domains, scope="domains")
-    mailing_state = PostgresStateStore(mailing, scope="mailing")
+    domains_state = PostgresStateStore(domains)
+    mailing_state = PostgresStateStore(mailing)
 
     async with domains.lead():
         await domains_state.save({"batch": 3}, {})
@@ -185,7 +172,7 @@ async def test_state_of_two_loops_does_not_mix(engine: AsyncEngine) -> None:
 async def test_rolled_back_tick_leaves_no_state(engine: AsyncEngine) -> None:
     """Сбой посреди такта не оставляет половины: окна и состояние в одной транзакции."""
     scope = scope_for(engine, "state-rollback")
-    store = PostgresStateStore(scope, scope="state-rollback")
+    store = PostgresStateStore(scope)
 
     with pytest.raises(RuntimeError, match="сбой такта"):
         async with scope.lead():
@@ -206,7 +193,7 @@ async def test_operator_pin_and_pause_are_visible_to_the_next_tick(
 ) -> None:
     """Оператор правит таблицу — контур видит это на следующем такте, без перезапуска."""
     scope = scope_for(engine, "overrides")
-    overrides = PostgresOverrideStore(scope, scope="overrides")
+    overrides = PostgresOverrideStore(scope)
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -274,7 +261,7 @@ async def test_pause_row_is_not_a_consumer(engine: AsyncEngine) -> None:
 
 async def test_unpausing_is_deleting_the_row(engine: AsyncEngine) -> None:
     scope = scope_for(engine, "overrides")
-    overrides = PostgresOverrideStore(scope, scope="overrides")
+    overrides = PostgresOverrideStore(scope)
 
     async with engine.begin() as connection:
         await connection.execute(

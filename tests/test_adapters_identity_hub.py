@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from capacity.ports import CapacitySource, SupplySource
-from capacity_adapters.identity_hub import IdentityHubCapacity, PoolSupply
+from capacity_adapters.identity_hub import (
+    IdentityFilterCapacity,
+    IdentityHubPoolCapacity,
+    PoolSupply,
+)
 
 ELIGIBLE = {"lifecycle": "ready", "standing": "good", "availability": "available"}
 FREE = {**ELIGIBLE, "without_link": "lease"}
@@ -41,7 +45,7 @@ def build(**counts: int) -> FakeIdentities:
 async def test_eligible_count_comes_from_the_domain_filter() -> None:
     """Что считать годным аккаунтом — решение домена, фильтр приходит снаружи."""
     identities = build(eligible=17)
-    source = IdentityHubCapacity(identities, eligible_filter=ELIGIBLE)
+    source = IdentityFilterCapacity(identities, eligible_filter=ELIGIBLE)
 
     capacity = await source.capacity()
 
@@ -51,7 +55,7 @@ async def test_eligible_count_comes_from_the_domain_filter() -> None:
 
 async def test_allocatable_follows_eligible_not_free() -> None:
     """Окно — план на работу: занятые аккаунты из раздачи не выпадают (см. S11)."""
-    source = IdentityHubCapacity(
+    source = IdentityFilterCapacity(
         build(eligible=10, free=2, leased=8),
         eligible_filter=ELIGIBLE,
         free_filter=FREE,
@@ -67,7 +71,7 @@ async def test_allocatable_follows_eligible_not_free() -> None:
 async def test_observability_filters_are_optional() -> None:
     """Без уточняющих фильтров занятость не измеряется, и это видно в метриках."""
     identities = build(eligible=5)
-    source = IdentityHubCapacity(identities, eligible_filter=ELIGIBLE)
+    source = IdentityFilterCapacity(identities, eligible_filter=ELIGIBLE)
 
     capacity = await source.capacity()
 
@@ -81,7 +85,7 @@ async def test_credits_bind_the_tail_of_the_work() -> None:
     async def work_units() -> int:
         return 2
 
-    source = IdentityHubCapacity(
+    source = IdentityFilterCapacity(
         build(eligible=10), eligible_filter=ELIGIBLE, work_units=work_units
     )
 
@@ -96,7 +100,7 @@ async def test_effective_capacity_is_fractional_for_replenishment() -> None:
     async def work_units() -> int:
         return 950
 
-    source = IdentityHubCapacity(
+    source = IdentityFilterCapacity(
         build(eligible=10),
         eligible_filter=ELIGIBLE,
         work_units=work_units,
@@ -111,7 +115,7 @@ async def test_effective_capacity_is_fractional_for_replenishment() -> None:
 
 def test_capacity_adapter_satisfies_the_port() -> None:
     assert isinstance(
-        IdentityHubCapacity(build(), eligible_filter=ELIGIBLE), CapacitySource
+        IdentityFilterCapacity(build(), eligible_filter=ELIGIBLE), CapacitySource
     )
 
 
@@ -129,7 +133,7 @@ async def test_supply_snapshot_collects_stock_demand_and_orders() -> None:
         return 20, 12
 
     supply = PoolSupply(
-        capacity_source=IdentityHubCapacity(
+        capacity_source=IdentityFilterCapacity(
             build(eligible=8),
             eligible_filter=ELIGIBLE,
             work_units=work_units,
@@ -157,9 +161,99 @@ def test_supply_adapter_satisfies_the_port() -> None:
         return 0, 0
 
     supply = PoolSupply(
-        capacity_source=IdentityHubCapacity(build(), eligible_filter=ELIGIBLE),
+        capacity_source=IdentityFilterCapacity(build(), eligible_filter=ELIGIBLE),
         demand_units=units,
         order_counts=counts,
     )
 
     assert isinstance(supply, SupplySource)
+
+
+# --- ёмкость из самого пула ---------------------------------------------------------
+
+
+@dataclass(slots=True)
+class FakePoolCapacity:
+    eligible: int
+    free: int
+    leased: int
+    reserved: int
+
+
+@dataclass(slots=True)
+class FakePool:
+    """`pool.eligible_count()`: тот же запрос кандидатов, что и у `pool.lease()`."""
+
+    result: FakePoolCapacity
+    asked: list[dict[str, Any]] = field(default_factory=list)
+
+    async def eligible_count(
+        self,
+        *,
+        for_operation: str | None = None,
+        among: Any = None,
+        require_quota: bool = False,
+        limit: int = 1_000_000,
+    ) -> FakePoolCapacity:
+        self.asked.append(
+            {
+                "for_operation": for_operation,
+                "among": among,
+                "require_quota": require_quota,
+                "limit": limit,
+            }
+        )
+        return self.result
+
+
+async def test_pool_capacity_asks_the_pool_with_the_lease_query() -> None:
+    """`among` обязан быть тем же, что у аренды: иначе окна под чужие аккаунты."""
+    among = "SELECT ... WHERE project_rules"
+    pool = FakePool(FakePoolCapacity(eligible=12, free=5, leased=7, reserved=0))
+    source = IdentityHubPoolCapacity(
+        pool, among=among, for_operation="check_domain", require_quota=True, limit=500
+    )
+
+    capacity = await source.capacity()
+
+    assert capacity.eligible == 12
+    assert pool.asked == [
+        {
+            "for_operation": "check_domain",
+            "among": among,
+            "require_quota": True,
+            "limit": 500,
+        }
+    ]
+
+
+async def test_pool_reserve_is_not_handed_out() -> None:
+    """Резерв пула — это аккаунты, которых аренда не даст."""
+    pool = FakePool(FakePoolCapacity(eligible=20, free=12, leased=8, reserved=5))
+    source = IdentityHubPoolCapacity(pool)
+
+    capacity = await source.capacity()
+
+    assert capacity.reserved == 5
+    assert capacity.allocatable == 15
+
+
+async def test_credits_bind_the_tail_of_pool_capacity() -> None:
+    """Сценарий из ишью: 30 аккаунтов в хорошем состоянии, кредиты у трёх."""
+
+    async def work_units() -> int:
+        return 3
+
+    pool = FakePool(FakePoolCapacity(eligible=30, free=30, leased=0, reserved=0))
+    source = IdentityHubPoolCapacity(pool, work_units=work_units)
+
+    capacity = await source.capacity()
+
+    assert capacity.eligible == 30
+    assert capacity.allocatable == 3
+
+
+def test_pool_capacity_satisfies_the_port() -> None:
+    pool = FakePool(FakePoolCapacity(eligible=1, free=1, leased=0, reserved=0))
+
+    assert isinstance(IdentityHubPoolCapacity(pool), CapacitySource)

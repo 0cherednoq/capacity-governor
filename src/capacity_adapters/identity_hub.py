@@ -18,13 +18,43 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from capacity.ports import CapacitySource
 from capacity.types import EligibleCapacity, SupplySnapshot
 
 
 class Identities(Protocol):
-    """`th`-подобный фасад Identity Hub: нужен только счёт по фильтру."""
+    """Фасад Identity Hub: нужен только счёт по фильтру."""
 
     async def count(self, where: Any = None) -> int: ...
+
+
+class PoolCapacity(Protocol):
+    """Результат `pool.eligible_count()`: ёмкость в разрезе занятости и резерва."""
+
+    @property
+    def eligible(self) -> int: ...
+
+    @property
+    def free(self) -> int: ...
+
+    @property
+    def leased(self) -> int: ...
+
+    @property
+    def reserved(self) -> int: ...
+
+
+class IdentityHubPool(Protocol):
+    """Пул Identity Hub: тот же запрос кандидатов, что и у `pool.lease()`."""
+
+    async def eligible_count(
+        self,
+        *,
+        for_operation: str | None = ...,
+        among: Any = ...,
+        require_quota: bool = ...,
+        limit: int = ...,
+    ) -> PoolCapacity: ...
 
 
 #: Сколько единиц работы покрывает остаток кредитов пула. Модель кредитов — доменная
@@ -34,14 +64,63 @@ WorkUnits = Callable[[], Awaitable[int]]
 
 
 @dataclass(slots=True)
-class IdentityHubCapacity:
-    """`CapacitySource` поверх `identities.count()`.
+class IdentityHubPoolCapacity:
+    """`CapacitySource` поверх `pool.eligible_count()`.
 
-    `eligible_filter` — годные для работы аккаунты (обычно `lifecycle=ready`,
-    `standing=good`, `availability=available`), `free_filter` и `leased_filter` —
-    необязательные уточнения для наблюдаемости (G1.3). Если их нет, `free` считается
-    равным `eligible`: раздача всё равно идёт по `eligible` (окно — план на работу, а
-    не захват ресурса сейчас), а в метриках будет видно, что занятость не измеряется.
+    Считает ровно те identity, которые выдаст `pool.lease(for_operation=…, among=…)`:
+    тот же запрос кандидатов, те же квоты, тот же резерв. Поэтому `among` обязан быть
+    тем же самым — лучше всего одной функцией, которая строит его и для аренды, и для
+    ёмкости. Разойдясь, они дают худший вид ошибки: контур раздаёт окна под аккаунты,
+    которых аренда не выдаст.
+
+    `limit` в Identity Hub ограничивает каждый внутренний счётчик: результат, равный
+    ему, означает «насыщено», а не точное число. Он должен быть не меньше суммарного
+    потолка потребителей, иначе ёмкость окажется занижена.
+
+    `work_units` — сколько единиц работы покрывают кредиты, если расход ресурса их
+    требует; `None` означает, что кредитов не считают.
+    """
+
+    pool: IdentityHubPool
+    among: Any = None
+    for_operation: str | None = None
+    require_quota: bool = False
+    limit: int = 1_000_000
+    work_units: WorkUnits | None = None
+    credits_per_resource: int = 1
+
+    async def capacity(self) -> EligibleCapacity:
+        hub = await self.pool.eligible_count(
+            for_operation=self.for_operation,
+            among=self.among,
+            require_quota=self.require_quota,
+            limit=self.limit,
+        )
+        units = await self.work_units() if self.work_units else None
+        return EligibleCapacity(
+            eligible=hub.eligible,
+            free=hub.free,
+            leased=hub.leased,
+            reserved=hub.reserved,
+            effective=0.0 if units is None else units / self.credits_per_resource,
+            work_units=units,
+        )
+
+
+@dataclass(slots=True)
+class IdentityFilterCapacity:
+    """`CapacitySource` поверх `identities.count(where=…)`.
+
+    Годится, когда годность ресурса целиком выражается полями Identity Hub:
+    `lifecycle`, `standing`, `auth`, `availability`, теги и точные значения меток.
+    Подзапрос к таблице проекта, сравнение по диапазону, квоты и резерв пула этот
+    фильтр выразить не может — для них берите `IdentityHubPoolCapacity`, который
+    спрашивает у самого пула.
+
+    `eligible_filter` — годные для работы аккаунты, `free_filter` и `leased_filter` —
+    необязательные уточнения для наблюдаемости. Если их нет, `free` считается равным
+    `eligible`: раздача всё равно идёт по `eligible`, а в метриках будет видно, что
+    занятость не измеряется.
     """
 
     identities: Identities
@@ -83,7 +162,7 @@ class PoolSupply:
     покрыть уже поставленную работу.
     """
 
-    capacity_source: IdentityHubCapacity
+    capacity_source: CapacitySource
     demand_units: Callable[[], Awaitable[int]]
     order_counts: Callable[[], Awaitable[tuple[int, int]]]
     credits_per_resource: int = 1

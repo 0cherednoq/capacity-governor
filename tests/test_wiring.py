@@ -10,24 +10,24 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from capacity import Governor, Hold, MaxMinFair, ReorderPoint, Stabilizer, TickStatus
-from capacity_adapters.identity_hub import IdentityHubCapacity, PoolSupply
+from capacity_adapters.identity_hub import IdentityFilterCapacity, PoolSupply
 from capacity_adapters.postgres import (
     PostgresOverrideStore,
     PostgresStateStore,
     PostgresTickScope,
 )
 from capacity_adapters.tallyho import (
-    TallyhoConsumers,
+    TallyhoDemand,
     TallyhoOrderLedger,
     TallyhoReplenisher,
     TallyhoWindows,
 )
 from tests.test_adapters_identity_hub import ELIGIBLE, FakeIdentities, _key
 from tests.test_adapters_postgres import FakeResult, FakeSession, FakeSessionScope, Row
-from tests.test_adapters_tallyho import FakeProgress, FakeTallyho
+from tests.test_adapters_tallyho import FakeDemand, FakeProgress, FakeTallyho
 
 NOW = datetime(2026, 10, 19, 15, 0, 0, tzinfo=UTC)
 TICK = 5
@@ -42,19 +42,6 @@ class FixedClock:
 
     def advance(self, seconds: int) -> None:
         self.moment += timedelta(seconds=seconds)
-
-
-class DictJournal:
-    """Журнал окон. В проекте это `PostgresStateStore.load_windows/save_windows`."""
-
-    def __init__(self) -> None:
-        self.windows: dict[str, int] = {}
-
-    async def load(self) -> Mapping[str, int]:
-        return dict(self.windows)
-
-    async def save(self, windows: Mapping[str, int]) -> None:
-        self.windows = dict(windows)
 
 
 class DictState:
@@ -113,15 +100,15 @@ def wire(
     demand: int,
     credits_units: int,
     leading: bool = True,
+    window_now: int = 0,
 ) -> tuple[Governor, dict[str, object]]:
     batch = uuid4()
-    tallyho = FakeTallyho({batch: FakeProgress(found=demand, queued=demand)})
+    tallyho = FakeTallyho(
+        rows=[FakeDemand(id=batch, pending=demand, max_in_flight=window_now)],
+        progress={batch: FakeProgress(found=demand, queued=demand)},
+    )
     identities = FakeIdentities({_key(ELIGIBLE): eligible})
     clock = FixedClock(NOW)
-    journal = DictJournal()
-
-    async def batches() -> Mapping[str, UUID]:
-        return {"domains": batch}
 
     async def work_units() -> int:
         return credits_units
@@ -129,7 +116,8 @@ def wire(
     async def demand_units() -> int:
         return demand
 
-    capacity_source = IdentityHubCapacity(
+    demand_source = TallyhoDemand(tallyho, kinds=["domains"])
+    capacity_source = IdentityFilterCapacity(
         identities,
         eligible_filter=ELIGIBLE,
         work_units=work_units,
@@ -141,8 +129,8 @@ def wire(
     governor = Governor(
         scope=PassthroughScope(leading=leading),
         capacity_source=capacity_source,
-        registry=TallyhoConsumers(tallyho, batches),
-        windows=TallyhoWindows(tallyho, lambda cid: batch, journal),
+        registry=demand_source,
+        windows=TallyhoWindows(tallyho, demand_source),
         state=DictState(),
         policy=MaxMinFair(min_hold_ticks=5),
         clock=clock,
@@ -162,7 +150,7 @@ def wire(
     )
     return governor, {
         "tallyho": tallyho,
-        "journal": journal,
+        "demand": demand_source,
         "clock": clock,
         "batch": batch,
     }
@@ -177,7 +165,7 @@ async def test_tick_reaches_tallyho_and_identity_hub() -> None:
     assert outcome.status is TickStatus.RAN
     tallyho = parts["tallyho"]
     assert [limit for _, limit, _, _ in tallyho.applied] == [4]  # type: ignore[attr-defined]
-    assert parts["journal"].windows == {"domains": 4}  # type: ignore[attr-defined]
+    assert [limit for _, limit, _, _ in tallyho.applied] == [4]  # type: ignore[attr-defined]
 
 
 async def test_window_is_not_rewritten_when_nothing_changed() -> None:
@@ -193,7 +181,7 @@ async def test_window_is_not_rewritten_when_nothing_changed() -> None:
 
 async def test_empty_pool_closes_the_window_and_orders_replenishment() -> None:
     """Ресурса нет: окно 0 немедленно, заказ — после коммита такта (G5, G6)."""
-    governor, parts = wire(eligible=0, demand=100, credits_units=0)
+    governor, parts = wire(eligible=0, demand=100, credits_units=0, window_now=5)
 
     await governor.tick()
 
@@ -225,8 +213,8 @@ async def test_postgres_pieces_fit_the_same_loop() -> None:
         ]
     )
     scope = PostgresTickScope(session_scope=FakeSessionScope(session), scope="domains")
-    state = PostgresStateStore(scope, scope="domains")
-    overrides = PostgresOverrideStore(scope, scope="domains")
+    state = PostgresStateStore(scope)
+    overrides = PostgresOverrideStore(scope)
 
     async with scope.lead() as leading:
         assert leading is True

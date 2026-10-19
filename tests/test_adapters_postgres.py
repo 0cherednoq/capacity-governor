@@ -190,7 +190,7 @@ async def test_state_is_loaded_from_one_scoped_query() -> None:
         ]
     )
     scope = scope_for(session)
-    store = PostgresStateStore(scope, scope="domains")
+    store = PostgresStateStore(scope)
 
     async with scope.lead():
         deficits, holds = await store.load()
@@ -235,28 +235,6 @@ async def test_deficits_and_holds_are_saved_in_the_same_transaction() -> None:
         inside = len(session.executed)
 
     assert inside == 3  # лок, дефициты, удержания
-
-
-async def test_window_journal_round_trip() -> None:
-    """Текущее окно у Tallyho не прочитать, поэтому его помнит контур."""
-    session = FakeSession(results=[FakeResult(rows=[Row(payload={"c0": 5})])])
-    scope = scope_for(session)
-    store = PostgresStateStore(scope)
-
-    async with scope.lead():
-        loaded = await store.load_windows()
-        await store.save_windows({"c0": 7})
-
-    assert loaded == {"c0": 5}
-    assert "INSERT INTO capacity_governor_state" in session.sql(2)
-
-
-async def test_missing_window_journal_reads_as_empty() -> None:
-    scope = scope_for(FakeSession())
-    store = PostgresStateStore(scope)
-
-    async with scope.lead():
-        assert await store.load_windows() == {}
 
 
 def test_state_store_satisfies_the_port() -> None:
@@ -316,7 +294,7 @@ async def test_override_query_is_scoped() -> None:
     """Несколько контуров в одной базе не видят переопределений друг друга."""
     session = FakeSession()
     scope = scope_for(session, "mailing")
-    store = PostgresOverrideStore(scope, scope="mailing")
+    store = PostgresOverrideStore(scope)
 
     async with scope.lead():
         await store.pinned()

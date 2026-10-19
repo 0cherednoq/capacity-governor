@@ -17,7 +17,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
-from capacity_adapters.identity_hub import IdentityHubCapacity
+from capacity_adapters.identity_hub import IdentityFilterCapacity
 
 DSN = os.environ.get(
     "CAPACITY_TEST_DSN",
@@ -135,7 +135,7 @@ async def test_capacity_counts_only_usable_accounts(space: object) -> None:
         auth=authenticated,
     )
 
-    source = IdentityHubCapacity(
+    source = IdentityFilterCapacity(
         space.identities,  # type: ignore[attr-defined]
         eligible_filter=identity_hub.IdentityFilter(
             service=CHECKER,
@@ -157,7 +157,7 @@ async def test_banning_the_pool_drops_capacity_to_zero(space: object) -> None:
         lifecycle=[str(identity_hub.Lifecycle.READY)],
         standing=[str(identity_hub.Standing.GOOD)],
     )
-    source = IdentityHubCapacity(space.identities, eligible_filter=filters)  # type: ignore[attr-defined]
+    source = IdentityFilterCapacity(space.identities, eligible_filter=filters)  # type: ignore[attr-defined]
 
     for index in range(2):
         await add_identity(
@@ -184,7 +184,7 @@ async def test_remaining_credits_bind_the_tail(space: object) -> None:
     async def work_units() -> int:
         return 2
 
-    source = IdentityHubCapacity(
+    source = IdentityFilterCapacity(
         space.identities,  # type: ignore[attr-defined]
         eligible_filter=identity_hub.IdentityFilter(
             service=CHECKER,

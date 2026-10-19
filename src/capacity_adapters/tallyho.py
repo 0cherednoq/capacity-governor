@@ -1,17 +1,13 @@
-"""Адаптеры к Tallyho: окна, спрос, бюджетный журнал, заказ пополнения (п.6 плана).
+"""Адаптеры к Tallyho: спрос, окна, бюджетный журнал, заказ пополнения.
 
 Tallyho здесь **не импортируется**. Внешнее API описано минимальными `Protocol` по
 его публичным сигнатурам, и реальный клиент удовлетворяет им структурно. Так адаптеры
-типизируются и тестируются без установки Tallyho, а ядро остаётся переносимым (G0).
+типизируются и тестируются без установки Tallyho, а ядро остаётся переносимым.
 
-Соответствие проверено по рабочему дереву Tallyho на 19.10.2026:
-
-* `BatchHandle.set_max_in_flight(limit, *, session=None, reason=None)` —
-  `src/tallyho/api/batch.py:425`, значение абсолютное и идемпотентное, `limit=0`
-  закрывает окно;
-* `BatchHandle.view() -> BatchView` — `api/batch.py:333`, спрос берётся из
-  `view().progress`;
-* `Tallyho.list_batches(kinds=…, states=…, created_after=…)` — `api/client.py:438`.
+Всё, что контуру нужно знать о потребителях, приходит одним вызовом `th.demand()`:
+спрос, текущее окно и признак паузы. Число запросов не зависит от числа батчей, а
+спрос и окна гарантированно описывают один и тот же момент — раньше окна приходилось
+помнить самому, и этот журнал расходился с Tallyho при любой правке мимо контура.
 """
 
 from __future__ import annotations
@@ -27,23 +23,70 @@ from collections.abc import (
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 from uuid import UUID
 
 from capacity.types import ConsumerState
 
+
+class DemandTruncatedError(RuntimeError):
+    """`th.demand()` упёрся в `limit`: часть батчей не попала в выдачу.
+
+    Раздавать по неполному списку нельзя — потребители, которых контур не увидел,
+    получат ноль, а их доля уйдёт остальным. Лучше пропустить такт и поднять `limit`.
+    """
+
+    def __init__(self, returned: int, limit: int) -> None:
+        super().__init__(
+            f"th.demand() вернул {returned} батчей при limit={limit}: "
+            "список усечён, раздавать по нему нельзя"
+        )
+        self.returned = returned
+        self.limit = limit
+
+
 # --- внешнее API Tallyho, описанное по его сигнатурам -------------------------------
 
 
-class Progress(Protocol):
-    """Счётчики батча: `found` — всего уникальных items, `queued` — ждут выполнения,
-    `in_flight` — у брокера.
+class BatchDemand(Protocol):
+    """Строка `th.demand()`: спрос и окно одного батча.
 
-    Члены объявлены только на чтение: адаптер ничего в них не пишет, а изменяемый
-    атрибут в `Protocol` инвариантен и не принял бы ни реальный `Progress` Tallyho,
-    ни подделку в тестах.
+    Члены объявлены на чтение: адаптер в них не пишет, а изменяемый атрибут в
+    `Protocol` инвариантен и не принял бы ни реальный тип Tallyho, ни подделку.
     """
 
+    @property
+    def id(self) -> UUID: ...
+
+    @property
+    def kind(self) -> str: ...
+
+    @property
+    def key(self) -> str | None: ...
+
+    @property
+    def attributes(self) -> Mapping[str, Any]: ...
+
+    @property
+    def pending(self) -> int: ...
+
+    @property
+    def in_flight(self) -> int: ...
+
+    @property
+    def deferred(self) -> int: ...
+
+    @property
+    def max_in_flight(self) -> int | None: ...
+
+    @property
+    def paused(self) -> bool: ...
+
+    @property
+    def truncated(self) -> bool: ...
+
+
+class Progress(Protocol):
     @property
     def found(self) -> int: ...
 
@@ -67,6 +110,14 @@ class BatchHandle(Protocol):
     ) -> None: ...
 
 
+class TaskCall(Protocol):
+    def opts(self, *, key: str | None = ..., **options: object) -> TaskCall: ...
+
+
+class BatchBuilder(Protocol):
+    async def add_calls(self, calls: Iterable[TaskCall]) -> None: ...
+
+
 class BatchInfo(Protocol):
     @property
     def id(self) -> UUID: ...
@@ -78,14 +129,6 @@ class BatchInfo(Protocol):
 class BatchPage(Protocol):
     @property
     def items(self) -> Sequence[BatchInfo]: ...
-
-
-class TaskCall(Protocol):
-    def opts(self, *, key: str | None = ..., **options: object) -> TaskCall: ...
-
-
-class BatchBuilder(Protocol):
-    async def add_calls(self, calls: Iterable[TaskCall]) -> None: ...
 
 
 class TallyhoClient(Protocol):
@@ -102,6 +145,14 @@ class TallyhoClient(Protocol):
         max_in_flight: int | None = ...,
     ) -> AbstractAsyncContextManager[BatchBuilder]: ...
 
+    async def demand(
+        self,
+        kinds: Sequence[str],
+        *,
+        attributes: Mapping[str, object] | None = ...,
+        limit: int = ...,
+    ) -> Sequence[BatchDemand]: ...
+
     async def find(self, kind: str, key: str) -> BatchHandle: ...
 
     async def list_batches(
@@ -113,103 +164,125 @@ class TallyhoClient(Protocol):
     ) -> BatchPage: ...
 
 
-# --- журнал применённых окон --------------------------------------------------------
+# --- спрос и окна одним снимком -----------------------------------------------------
 
 
-@runtime_checkable
-class WindowJournal(Protocol):
-    """Чем контур помнит, какое окно он выставил.
+def ready_demand(row: BatchDemand) -> int:
+    """Сколько работы потребитель может запустить прямо сейчас.
 
-    Прочитать текущее окно у Tallyho нельзя: `set_max_in_flight` и
-    `clear_max_in_flight` есть, а в `BatchView` окна нет. Для мёртвой зоны (G5) нужно
-    сравнивать новое значение с текущим, поэтому контур ведёт журнал сам — и это
-    корректно: окна абсолютны, и пишет их только он. Вмешательство оператора идёт
-    через `pin`/`pause` (G7), то есть мимо этого журнала и явно.
+    Отложенные items (`item.defer`) из спроса вычитаются: они не уйдут в брокер раньше
+    своего срока, и окно под них простояло бы впустую. В пополнении спрос считается
+    иначе — там нужна вся оставшаяся работа, включая отложенную.
+    """
+    return max(0, row.pending - row.deferred)
+
+
+@dataclass(slots=True)
+class TallyhoDemand:
+    """Снимок спроса и окон за такт: один `th.demand()` при любом числе батчей.
+
+    Снимок делает `consumers()`, а `windows()` отдаёт окна из него же. Контур читает
+    спрос раньше окон, поэтому они всегда описывают один момент. Батч с
+    `max_in_flight is None` контуру не принадлежит: окна ему не выставляли, и он в
+    раздачу не входит — иначе governor молча забрал бы под управление чужую работу.
     """
 
-    async def load(self) -> Mapping[str, int]: ...
+    client: TallyhoClient
+    kinds: Sequence[str]
+    attributes: Mapping[str, object] | None = None
+    limit: int = 1000
+    weight_of: Callable[[BatchDemand], int] = lambda _: 1
+    guaranteed_of: Callable[[BatchDemand], int] = lambda _: 0
+    ceiling_of: Callable[[BatchDemand], int | None] = lambda _: None
+    snapshot: dict[str, BatchDemand] = field(default_factory=dict)
 
-    async def save(self, windows: Mapping[str, int]) -> None: ...
+    async def consumers(self) -> Sequence[ConsumerState]:
+        rows = await self.client.demand(
+            self.kinds, attributes=self.attributes, limit=self.limit
+        )
+        if any(row.truncated for row in rows):
+            raise DemandTruncatedError(len(rows), self.limit)
 
+        self.snapshot = {
+            str(row.id): row
+            for row in rows
+            # Пауза — решение человека, и окно ей не нужно: батч всё равно не работает.
+            if not row.paused and row.max_in_flight is not None
+        }
+        return [
+            ConsumerState(
+                consumer_id=consumer_id,
+                demand=ready_demand(row),
+                weight=self.weight_of(row),
+                guaranteed=self.guaranteed_of(row),
+                ceiling=self.ceiling_of(row),
+            )
+            for consumer_id, row in self.snapshot.items()
+        ]
 
-# --- адаптеры -----------------------------------------------------------------------
+    def windows(self) -> Mapping[str, int]:
+        """Текущие окна из того же снимка, что и спрос."""
+        return {
+            consumer_id: row.max_in_flight
+            for consumer_id, row in self.snapshot.items()
+            if row.max_in_flight is not None
+        }
 
-#: Как `consumer_id` политики превращается в батч Tallyho и обратно.
-BatchResolver = Callable[[str], UUID]
+    def pending_work(self) -> int:
+        """Вся оставшаяся работа, включая отложенную: столько нужно ресурса.
+
+        Это вход правила нехватки в `ReorderPoint`: пополнять надо под всю работу, а
+        не только под ту, что может начаться сейчас.
+        """
+        return sum(row.pending for row in self.snapshot.values())
+
+    def deferred_work(self) -> int:
+        """Сколько работы ждёт своего срока: метрика нехватки ресурса."""
+        return sum(row.deferred for row in self.snapshot.values())
 
 
 @dataclass(slots=True)
 class TallyhoWindows:
-    """`WindowSink` поверх `set_max_in_flight` (п.6, G6).
+    """`WindowSink` поверх `set_max_in_flight`.
 
-    Все окна такта выставляются в транзакции такта: `session` передаётся в Tallyho,
-    изменение входит в коммит вызывающего, а relay получает пинок после него. Окна
-    абсолютны, поэтому повтор такта ничего не ломает.
+    Текущие окна берутся из снимка `TallyhoDemand` — того же, что дал спрос. Своего
+    журнала у контура больше нет: он рос без границ, расходился с Tallyho после
+    пересоздания схемы и не видел окон, выставленных проектом мимо контура.
+
+    Все окна такта выставляются в его транзакции: `session` передаётся в Tallyho,
+    изменение входит в коммит вызывающего, а relay получает пинок после него.
     """
 
     client: TallyhoClient
-    resolve: BatchResolver
-    journal: WindowJournal
+    demand: TallyhoDemand
     session_provider: Callable[[], Any] | None = None
     reason: str = "capacity-governor"
 
     async def current_windows(self) -> Mapping[str, int]:
-        return await self.journal.load()
+        return self.demand.windows()
 
     async def set_windows(self, windows: Mapping[str, int]) -> None:
         session = self.session_provider() if self.session_provider else None
         for consumer_id, limit in windows.items():
-            handle = self.client.handle(self.resolve(consumer_id))
+            handle = self.client.handle(UUID(consumer_id))
             await handle.set_max_in_flight(limit, session=session, reason=self.reason)
-        applied = dict(await self.journal.load())
-        applied.update(windows)
-        await self.journal.save(applied)
-
-
-@dataclass(slots=True)
-class TallyhoConsumers:
-    """`ConsumerRegistry` поверх `view().progress`.
-
-    Спрос — это остаток работы: `queued + in_flight`. Дешёвого `demand()` (T3) в
-    Tallyho ещё нет, поэтому берётся `view()`, то есть чтение поддерева батча на такт.
-    Для единиц батчей это единицы запросов; когда потребителей станет много, T3
-    превратится из удобства в необходимость, и заменится ровно это место.
-    """
-
-    client: TallyhoClient
-    batches: Callable[[], Awaitable[Mapping[str, UUID]]]
-    weights: Mapping[str, int] = field(default_factory=dict)
-    guarantees: Mapping[str, int] = field(default_factory=dict)
-    ceilings: Mapping[str, int] = field(default_factory=dict)
-
-    async def consumers(self) -> Sequence[ConsumerState]:
-        states: list[ConsumerState] = []
-        for consumer_id, batch_id in (await self.batches()).items():
-            progress = (await self.client.handle(batch_id).view()).progress
-            states.append(
-                ConsumerState(
-                    consumer_id=consumer_id,
-                    demand=progress.queued + progress.in_flight,
-                    weight=self.weights.get(consumer_id, 1),
-                    guaranteed=self.guarantees.get(consumer_id, 0),
-                    ceiling=self.ceilings.get(consumer_id),
-                )
-            )
-        return states
 
 
 @dataclass(slots=True)
 class TallyhoOrderLedger:
-    """Бюджетный журнал пополнения: сами батчи регистраций и есть журнал (G4).
+    """Бюджетный журнал пополнения: сами батчи регистраций и есть журнал.
 
-    `ordered_in_window` считается по батчам, созданным с начала бюджетного окна, а
-    `ordered_in_progress` — по их незавершённым слотам. Батчей за окно единицы, цена
-    чтения — единицы запросов, и результат кэшируется на длительность такта: политике
-    он нужен один раз за такт.
+    `ordered_in_window` — все слоты, заказанные с начала бюджетного окна, включая уже
+    выполненные: бюджет тратит сам факт заказа. Их число даёт только `found`, которого
+    в `demand()` нет, поэтому батчи окна читаются через `view()`. Это не возврат к
+    старому: батчей за окно единицы, и читаются они раз в такт, а не на каждый батч
+    работы, как было со спросом.
+
+    Результат кэшируется на длительность такта: политике он нужен один раз за такт.
     """
 
     client: TallyhoClient
-    kinds: Collection[str]
+    kinds: Sequence[str]
     window: timedelta
     now: Callable[[], datetime]
     cache_for: timedelta = timedelta(seconds=5)
@@ -224,15 +297,15 @@ class TallyhoOrderLedger:
                 return in_window, in_progress
 
         page = await self.client.list_batches(
-            kinds=self.kinds, created_after=moment - self.window, limit=100
+            kinds=list(self.kinds), created_after=moment - self.window, limit=100
         )
+        # Бюджет тратит сам факт заказа, поэтому в окне считаются все слоты, а в
+        # работе — только незавершённые: упавшая регистрация освобождает место в
+        # расчёте нехватки, но бюджет окна уже израсходован.
         in_window = 0
         in_progress = 0
         for info in page.items:
             progress = (await self.client.handle(info.id).view()).progress
-            # Бюджет тратит сам факт заказа, поэтому в окне считаются все слоты,
-            # а в работе — только незавершённые: упавшая регистрация освобождает
-            # место в расчёте нехватки, но бюджет окна уже израсходован.
             in_window += progress.found
             in_progress += progress.queued + progress.in_flight
         self._cached = (moment, in_window, in_progress)
@@ -241,7 +314,7 @@ class TallyhoOrderLedger:
 
 @dataclass(slots=True)
 class TallyhoReplenisher:
-    """`Replenisher`: заказ — это батч регистраций (G4, §8.3 документа).
+    """`Replenisher`: заказ — это батч регистраций.
 
     Идемпотентность держится на двух ключах, и оба здесь не случайны:
 
@@ -270,9 +343,7 @@ class TallyhoReplenisher:
             return
         existing = await self._slots_in(window_key)
         calls = [
-            self.client.call(self.register, window_key, index).opts(
-                key=f"slot:{index}"
-            )
+            self.client.call(self.register, window_key, index).opts(key=f"slot:{index}")
             for index in range(existing, existing + count)
         ]
         async with self.client.batch(
@@ -289,9 +360,12 @@ class TallyhoReplenisher:
         Нумерация продолжается с этого места, иначе повторный заказ попал бы на уже
         занятые ключи `slot:{i}` и был бы отсеян индексом целиком — бюджет списался
         бы, а работа не появилась.
+
+        Считается по `found`, а не по незавершённым: слот, который уже выполнился,
+        свой ключ не освобождает. Поэтому здесь `view()`, а не `demand()`.
         """
         try:
             handle = await self.client.find(self.kind, window_key)
         except Exception:
-            return 0
+            return 0  # батча этого окна ещё нет — заказ первый
         return (await handle.view()).progress.found

@@ -70,12 +70,13 @@ allocation.grants  # {'urgent-scrape': 6, 'daily-scrape': 3, 'backfill': 3}
 сам пересчитывает окна по расписанию:
 
 ```python
+scope = PostgresTickScope(session_scope=sessionmaker, scope="scrapers")
 governor = Governor(
-    scope=PostgresTickScope(session_scope=sessionmaker, scope="scrapers"),
+    scope=scope,
     capacity_source=proxy_pool,     # сколько прокси живо
     registry=jobs,                  # кто и сколько просит
     windows=job_windows,            # куда применить окна
-    state=PostgresStateStore(scope, scope="scrapers"),
+    state=PostgresStateStore(scope),
     policy=MaxMinFair(min_hold_ticks=5),
     clock=clock,
     stabilizer=Stabilizer(),
@@ -130,7 +131,7 @@ python -m examples.proxy_pool
 |---|---|---|
 | `capacity_adapters.memory` | всё в памяти: примеры, тесты, прототипы | — |
 | `capacity_adapters.postgres` | лидерство на advisory-локе, состояние, `pin`/`pause` | `[postgres]` |
-| `capacity_adapters.tallyho` | окна, спрос и заказ пополнения через Tallyho | `[tallyho]` |
+| `capacity_adapters.tallyho` | спрос и окна одним запросом, заказ пополнения | `[tallyho]` |
 | `capacity_adapters.identity_hub` | ёмкость пула аккаунтов через Identity Hub | `[identity-hub]` |
 
 Адаптеры к Tallyho и Identity Hub написаны против их публичных сигнатур и сами эти
@@ -140,7 +141,7 @@ python -m examples.proxy_pool
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev,postgres]" asyncpg
-pytest -q                # 243 теста: политики, контур, адаптеры, симуляция, интеграция
+pytest -q                # 261 тест: политики, контур, адаптеры, симуляция, интеграция
 python -m sim            # прогоны симуляции: как ведут себя параметры под нагрузкой
 ruff check . && mypy src tests sim
 ```

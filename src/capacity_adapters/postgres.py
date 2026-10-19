@@ -131,7 +131,15 @@ class PostgresStateStore:
     """
 
     scope_provider: PostgresTickScope
-    scope: str = "default"
+
+    @property
+    def scope(self) -> str:
+        """Имя контура берётся у транзакции такта, а не задаётся отдельно.
+
+        Повторять строку в трёх местах — значит однажды опечататься в одном из них и
+        молча развести состояние по двум ключам: контур будет читать не свою очередь.
+        """
+        return self.scope_provider.scope
 
     async def load(self) -> tuple[Mapping[str, int], Mapping[str, Hold]]:
         session = self.scope_provider.session()
@@ -155,23 +163,6 @@ class PostgresStateStore:
                 for cid, hold in holds.items()
             },
         )
-
-    async def load_windows(self) -> Mapping[str, int]:
-        """`WindowJournal.load`: какие окна контур выставил в прошлый раз."""
-        session = self.scope_provider.session()
-        row = await session.execute(
-            GOVERNOR_STATE.select().where(
-                (GOVERNOR_STATE.c.scope == self.scope)
-                & (GOVERNOR_STATE.c.name == "windows")
-            )
-        )
-        found = row.first()
-        if found is None:
-            return {}
-        return {str(k): int(v) for k, v in (found.payload or {}).items()}
-
-    async def save_windows(self, windows: Mapping[str, int]) -> None:
-        await self._upsert("windows", dict(windows))
 
     async def _upsert(self, name: str, payload: Mapping[str, Any]) -> None:
         session = self.scope_provider.session()
@@ -199,9 +190,13 @@ class PostgresOverrideStore:
     """
 
     scope_provider: PostgresTickScope
-    scope: str = "default"
     session_scope: SessionScope | None = None
     _cache: tuple[int, list[Any]] | None = field(default=None, init=False)
+
+    @property
+    def scope(self) -> str:
+        """Имя контура берётся у транзакции такта — по той же причине, что и в состоянии."""
+        return self.scope_provider.scope
 
     async def pin(self, consumer_id: str, limit: int) -> None:
         if consumer_id == PAUSE_ROW:
