@@ -7,19 +7,41 @@ import pytest
 from capacity import ConsumerState, EligibleCapacity, SupplySnapshot, TickReport
 
 
-def test_allocatable_is_floor_of_effective_capacity() -> None:
-    """Ёмкость для раздачи целая (G1.1): 4.7 эффективных аккаунта дают 4 окна."""
-    assert EligibleCapacity(eligible=10, free=10, effective=4.7).allocatable == 4
+def test_allocatable_is_the_width_of_work_not_the_size_of_the_stock() -> None:
+    """Кредиты ограничивают объём работы, а не её ширину.
+
+    Десять аккаунтов, потративших часть кредитов, дают 9.5 «эффективных аккаунта», но
+    параллельно работать могут все десять: запас и параллелизм — разные величины.
+    """
+    capacity = EligibleCapacity(eligible=10, free=10, effective=9.5, work_units=950)
+
+    assert capacity.allocatable == 10
 
 
-def test_fraction_below_one_gives_zero_windows() -> None:
-    """0.9 эффективного аккаунта — это 0 окон: пограничный случай из G1.1."""
-    assert EligibleCapacity(eligible=1, free=1, effective=0.9).allocatable == 0
+def test_remaining_credits_bind_only_the_tail() -> None:
+    """Кредитов осталось на две единицы работы при трёх ресурсах — окон два."""
+    assert EligibleCapacity(eligible=3, free=3, effective=0.02, work_units=2).allocatable == 2
 
 
-def test_allocatable_never_exceeds_free() -> None:
-    """Кредитов может быть много, а свободных ресурсов мало — раздаём по свободным."""
-    assert EligibleCapacity(eligible=10, free=2, leased=8, effective=9.5).allocatable == 2
+def test_no_credits_left_means_no_windows() -> None:
+    """Пограничный случай G1.1: работа встаёт, и `min_grant_floor` решает, давать ли шанс."""
+    assert EligibleCapacity(eligible=1, free=1, effective=0.9, work_units=0).allocatable == 0
+
+
+def test_allocatable_counts_busy_resources_in() -> None:
+    """Окно — план на работу: занятые по уже выданным окнам ресурсы из счёта не выпадают.
+
+    Иначе окна схлопываются ровно при полной загрузке пула, работа встаёт, ресурсы
+    освобождаются, окна растут — контур автоколеблется.
+    """
+    capacity = EligibleCapacity(eligible=10, free=2, leased=8, effective=9.5, work_units=950)
+
+    assert capacity.allocatable == 10
+
+
+def test_allocatable_never_exceeds_eligible() -> None:
+    """Кредитов много, ресурсов мало — раздаём по ресурсам."""
+    assert EligibleCapacity(eligible=3, free=3, work_units=1900).allocatable == 3
 
 
 def test_capacity_source_reports_observability_fields() -> None:

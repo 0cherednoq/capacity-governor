@@ -25,6 +25,7 @@ import simpy
 from capacity import (
     ConsumerState,
     EligibleCapacity,
+    Hold,
     MaxMinFair,
     ReorderPoint,
     Stabilizer,
@@ -94,6 +95,7 @@ class SimConfig:
     budget_window: timedelta = timedelta(hours=1)
     tolerance: float = 0.1
     stabilize_down: timedelta = timedelta(seconds=300)
+    min_hold_ticks: int = 1
     seed: int = 20261016
 
 
@@ -143,7 +145,8 @@ class Simulation:
         self.orders_in_progress = 0
         self.orders_by_window: Counter[str] = Counter()
         self.deficits: Mapping[str, int] = {}
-        self.policy = MaxMinFair()
+        self.holds: Mapping[str, Hold] = {}
+        self.policy = MaxMinFair(min_hold_ticks=config.min_hold_ticks)
         self.stabilizer = Stabilizer(
             tolerance=config.tolerance, stabilize_down=config.stabilize_down
         )
@@ -197,7 +200,12 @@ class Simulation:
             account.state = AccountState.ACTIVE
 
     def capacity(self) -> EligibleCapacity:
-        eligible = sum(1 for a in self.all_accounts if a.state is AccountState.ACTIVE)
+        # Годен тот, кто активен и ещё может оплатить единицу работы.
+        eligible = sum(
+            1
+            for a in self.all_accounts
+            if a.state is AccountState.ACTIVE and a.credits.level >= self.config.credit_cost
+        )
         free = sum(1 for a in self.pool.items if a.usable)
         credit_sum = sum(
             a.credits.level for a in self.all_accounts if a.state is AccountState.ACTIVE
@@ -210,6 +218,7 @@ class Simulation:
             leased=self.leased,
             reserved=0,
             effective=effective,
+            work_units=int(credit_sum // self.config.credit_cost),
         )
 
     def supply(self, now: datetime) -> SupplySnapshot:
@@ -246,10 +255,12 @@ class Simulation:
                 },
                 policy=self.policy,
                 stabilizer=self.stabilizer,
+                holds=self.holds,
                 supply=self.supply(now),
                 reorder=self.reorder,
             )
             self.deficits = plan.deficits
+            self.holds = plan.holds
             for cid, limit in plan.windows.items():
                 self.consumers[cid].window = limit
             self.metrics.window_writes += len(plan.windows)

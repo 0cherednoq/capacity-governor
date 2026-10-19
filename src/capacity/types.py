@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -39,11 +38,30 @@ class ConsumerState:
 
 
 @dataclass(frozen=True, slots=True)
+class Hold:
+    """Удержание выдачи: сколько ещё тактов за потребителем закреплён его объём.
+
+    Нужно, чтобы окно, которое только что выдали, не отобрали раньше, чем потребитель
+    успеет им воспользоваться: единица работы длится дольше такта контура.
+    """
+
+    amount: int
+    ticks_left: int
+
+    def __post_init__(self) -> None:
+        if self.amount < 0:
+            raise ValueError("amount < 0")
+        if self.ticks_left < 0:
+            raise ValueError("ticks_left < 0")
+
+
+@dataclass(frozen=True, slots=True)
 class Allocation:
-    """Результат такта: выдача и дефициты, переносимые в следующий такт."""
+    """Результат такта: выдача и состояние, переносимое в следующий такт."""
 
     grants: Mapping[str, int]
     deficits: Mapping[str, int]
+    holds: Mapping[str, Hold] = field(default_factory=dict)
 
     @property
     def total_granted(self) -> int:
@@ -62,6 +80,7 @@ class EligibleCapacity:
     leased: int = 0
     reserved: int = 0
     effective: float = 0.0
+    work_units: int | None = None
 
     def __post_init__(self) -> None:
         for name in ("eligible", "free", "leased", "reserved"):
@@ -69,11 +88,38 @@ class EligibleCapacity:
                 raise ValueError(f"{name} < 0")
         if self.effective < 0:
             raise ValueError("effective < 0")
+        if self.work_units is not None and self.work_units < 0:
+            raise ValueError("work_units < 0")
 
     @property
     def allocatable(self) -> int:
-        """Ёмкость для раздачи: floor от эффективной, но не больше свободной."""
-        return min(self.free, math.floor(self.effective)) if self.effective else self.free
+        """Ёмкость для раздачи: сколько работы может идти параллельно прямо сейчас.
+
+        Две вещи, которые план сводит в одну величину, здесь разделены, и обе правки
+        подтверждены прогоном 4 симуляции.
+
+        **Считается по `eligible`, а не по `free`.** Окно — это план на работу, а не
+        захват ресурса сейчас: ресурсы, занятые работой из уже выданных окон, лежат в
+        `leased` и из `free` вычтены. Раздача по `free` схлопывает окна ровно в тот
+        момент, когда пул загружен полностью: работа встаёт, ресурсы освобождаются,
+        окна снова растут — контур автоколеблется. В прогоне 4 ёмкость была нулевой в
+        202 тактах из 720 при трёх живых аккаунтах.
+
+        **Ограничивает `work_units`, а не `floor(effective)`.** «Эффективные аккаунты»
+        (сумма кредитов, делённая на кредиты нового аккаунта) — мера запаса, она нужна
+        политике пополнения и живёт в `SupplySnapshot.effective_available`. Параллелизм
+        она измерять не может: три аккаунта, потратившие по одному кредиту из ста, дают
+        2.97 эффективного аккаунта и `floor` в 2 окна, хотя работать могут все три.
+        Кредиты ограничивают объём работы, а не её ширину, поэтому ограничение —
+        `work_units`: сколько единиц работы покрывает остаток кредитов. Оно связывает
+        только хвост, когда кредитов осталось меньше, чем ресурсов.
+
+        `free`, `leased`, `reserved` и `effective` остаются величинами наблюдаемости
+        (G1.3) — по ним строится график загрузки пула.
+        """
+        if self.work_units is None:
+            return self.eligible
+        return min(self.eligible, self.work_units)
 
 
 @dataclass(frozen=True, slots=True)

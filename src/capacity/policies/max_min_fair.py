@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from capacity.types import Allocation, ConsumerState
+from capacity.types import Allocation, ConsumerState, Hold
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,22 +38,35 @@ class MaxMinFair:
     ёмкости между 0 и 1 (floor дал 0, а кредиты ещё есть). По умолчанию 0: лучше
     встать, чем жечь попытки. Если задан, его получает один потребитель — первый
     по очереди дефицитов, чтобы остаток доедался последовательно, а не размазывался.
+
+    `min_hold_ticks` — сколько тактов выданный объём закреплён за потребителем. По
+    умолчанию 1, то есть раздача пересчитывается каждый такт. Смысл значения больше
+    единицы виден там, где ёмкость меньше числа потребителей: окна ходят между 0 и 1
+    каждый такт, и каждый такой переход — исключение из мёртвой зоны, то есть запись
+    в БД. Удержание отдаёт потребителю его единицу на несколько тактов подряд, пока
+    остальные ждут в очереди по дефицитам — справедливость сохраняется, а частота
+    записи падает кратно. Разумная величина — время единицы работы, делённое на такт:
+    отбирать окно раньше, чем работа успевает пройти, значит просто жечь записи.
     """
 
     deficit_cap_ticks: int = 4
     min_grant_floor: int = 0
+    min_hold_ticks: int = 1
 
     def __post_init__(self) -> None:
         if self.deficit_cap_ticks < 1:
             raise ValueError("deficit_cap_ticks < 1")
         if self.min_grant_floor < 0:
             raise ValueError("min_grant_floor < 0")
+        if self.min_hold_ticks < 1:
+            raise ValueError("min_hold_ticks < 1")
 
     def allocate(
         self,
         capacity: int,
         consumers: Sequence[ConsumerState],
         deficits: Mapping[str, int],
+        holds: Mapping[str, Hold] | None = None,
     ) -> Allocation:
         if capacity < 0:
             raise ValueError("capacity < 0")
@@ -78,15 +91,65 @@ class MaxMinFair:
             return Allocation(
                 grants=grants,
                 deficits=self._carry(order, grants, grants, deficits),
+                holds=self._next_holds(order, grants, holds or {}),
             )
 
+        remaining = self._honour_holds(order, grants, holds or {}, remaining)
         remaining = self._grant_guarantees(order, grants, remaining)
         guaranteed_part = dict(grants)
         self._fill(order, grants, remaining)
         return Allocation(
             grants=grants,
             deficits=self._carry(order, grants, guaranteed_part, deficits),
+            holds=self._next_holds(order, grants, holds or {}),
         )
+
+    @staticmethod
+    def _honour_holds(
+        order: Sequence[ConsumerState],
+        grants: dict[str, int],
+        holds: Mapping[str, Hold],
+        remaining: int,
+    ) -> int:
+        """Шаг 0: закреплённое выдаётся раньше всего остального.
+
+        Ёмкость могла упасть с прошлого такта, поэтому удержание всё равно урезается
+        по оставшейся ёмкости: обещание держать окно не создаёт ресурса.
+        """
+        for c in order:
+            if remaining == 0:
+                break
+            hold = holds.get(c.consumer_id)
+            if hold is None or hold.ticks_left == 0:
+                continue
+            give = min(hold.amount, c.headroom, remaining)
+            if give > 0:
+                grants[c.consumer_id] += give
+                remaining -= give
+        return remaining
+
+    def _next_holds(
+        self,
+        order: Sequence[ConsumerState],
+        grants: Mapping[str, int],
+        holds: Mapping[str, Hold],
+    ) -> dict[str, Hold]:
+        """Шаг 6: продлить начатые удержания и начать новые по сегодняшней выдаче."""
+        if self.min_hold_ticks == 1:
+            return {}
+        carried: dict[str, Hold] = {}
+        for c in order:
+            cid = c.consumer_id
+            granted = grants.get(cid, 0)
+            if granted == 0:
+                continue
+            running = holds.get(cid)
+            if running is not None and running.ticks_left > 1:
+                carried[cid] = Hold(amount=min(running.amount, granted),
+                                    ticks_left=running.ticks_left - 1)
+            elif running is None:
+                carried[cid] = Hold(amount=granted, ticks_left=self.min_hold_ticks - 1)
+        return carried
 
     @staticmethod
     def _grant_guarantees(

@@ -23,6 +23,7 @@ from capacity.types import (
     Allocation,
     ConsumerState,
     EligibleCapacity,
+    Hold,
     SupplySnapshot,
     TickReport,
 )
@@ -33,11 +34,12 @@ class TickPlan:
     """Что контур должен сделать в этом такте.
 
     `windows` — только изменившиеся окна: не изменившееся не пишется вовсе.
-    `deficits` сохраняются вне памяти процесса, лидер меняется между тактами.
+    `deficits` и `holds` сохраняются вне памяти процесса: лидер меняется между тактами.
     """
 
     windows: Mapping[str, int]
     deficits: Mapping[str, int]
+    holds: Mapping[str, Hold]
     allocation: Allocation
     order: int
     order_window_key: str | None
@@ -53,6 +55,7 @@ def plan_tick(
     current_windows: Mapping[str, int],
     policy: AllocationPolicy,
     stabilizer: Stabilizer,
+    holds: Mapping[str, Hold] | None = None,
     supply: SupplySnapshot | None = None,
     reorder: ReorderPoint | None = None,
     pinned: Mapping[str, int] | None = None,
@@ -77,7 +80,7 @@ def plan_tick(
         for c in consumers
     ]
 
-    allocation = policy.allocate(capacity.allocatable, effective, deficits)
+    allocation = policy.allocate(capacity.allocatable, effective, deficits, holds)
 
     recommended = {
         cid: grant for cid, grant in allocation.grants.items() if cid not in pins
@@ -107,6 +110,7 @@ def plan_tick(
     return TickPlan(
         windows=windows,
         deficits=allocation.deficits,
+        holds=allocation.holds,
         allocation=allocation,
         order=order,
         order_window_key=window_key,

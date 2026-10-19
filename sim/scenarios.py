@@ -56,14 +56,42 @@ def surge() -> Simulation:
     return Simulation(config, [Consumer("surge", remaining=10_000)], accounts=30)
 
 
+def _scarce_capacity(min_hold_ticks: int) -> Simulation:
+    """Три аккаунта на двадцать потребителей, пополнение выключено.
+
+    Пополнение выключено намеренно (`max_per_window = 0`): правило нехватки под спрос
+    заказывает двадцать аккаунтов на первом же такте, через четверть часа ёмкости
+    хватает всем, и прогон перестаёт проверять то, ради чего он есть. Работы взято
+    ровно столько, сколько покрывают кредиты трёх аккаунтов.
+    """
+    config = replace(
+        BASE, horizon=4 * 3600, max_per_window=0, min_hold_ticks=min_hold_ticks
+    )
+    consumers = [Consumer(f"batch-{i:02d}", remaining=10) for i in range(20)]
+    return Simulation(config, consumers, accounts=3)
+
+
 def capacity_below_consumers() -> Simulation:
     """Прогон 4: ёмкость меньше числа потребителей.
 
     Вопрос: никто не голодает — проверка DRR из G2 на живой модели.
+
+    Удержание (`min_hold_ticks = 5`) здесь не украшение, а условие работоспособности:
+    единица работы длится 20 с при такте 5 с, и окно, которое переезжает каждый такт,
+    потребитель просто не успевает использовать — работа уходит в `defer`, а не
+    выполняется. Величина выбрана прогоном `capacity_below_consumers_sweep`.
     """
-    config = replace(BASE, horizon=2 * 3600)
-    consumers = [Consumer(f"batch-{i:02d}", remaining=50) for i in range(20)]
-    return Simulation(config, consumers, accounts=3)
+    return _scarce_capacity(min_hold_ticks=5)
+
+
+def capacity_below_consumers_no_hold() -> Simulation:
+    """Контрольный прогон к четвёртому: та же нехватка без удержания окна."""
+    return _scarce_capacity(min_hold_ticks=1)
+
+
+def capacity_below_consumers_sweep() -> list[tuple[int, Simulation]]:
+    """Развёртка по величине удержания: по ней и выбрано значение для прогона 4."""
+    return [(hold, _scarce_capacity(hold)) for hold in (1, 2, 3, 4, 5, 6, 8)]
 
 
 def half_pool_banned() -> Simulation:
@@ -126,6 +154,11 @@ SCENARIOS: tuple[Scenario, ...] = (
     Scenario("2. обычные сутки", "заказов 0, окна не дрожат", ordinary_day),
     Scenario("3. наплыв ×10", "растягивается по бюджету, не проваливается", surge),
     Scenario("4. ёмкость < потребителей", "никто не голодает (DRR)", capacity_below_consumers),
+    Scenario(
+        "4б. то же без удержания",
+        "контрольный замер к прогону 4",
+        capacity_below_consumers_no_hold,
+    ),
     Scenario("5. массовый бан пула", "defer держит, пополнение поднимает", half_pool_banned),
     Scenario("6. колеблющаяся ёмкость", "записей окон мало (мёртвая зона)", flapping_capacity),
     Scenario("6б. без мёртвой зоны", "контрольный замер к прогону 6", no_dead_zone_baseline),

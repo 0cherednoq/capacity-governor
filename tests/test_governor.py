@@ -170,7 +170,9 @@ def test_report_carries_the_tick_observability() -> None:
     """Набор метрик такта из G6."""
     plan = plan_tick(
         now=NOW,
-        capacity=EligibleCapacity(eligible=10, free=6, leased=3, reserved=1, effective=6.0),
+        capacity=EligibleCapacity(
+            eligible=10, free=6, leased=3, reserved=1, effective=6.0, work_units=6
+        ),
         consumers=[ConsumerState("a", 100), ConsumerState("b", 100)],
         deficits={},
         current_windows={},

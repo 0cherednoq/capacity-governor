@@ -5,6 +5,7 @@ from __future__ import annotations
 from sim.model import windows_per_hour
 from sim.scenarios import (
     capacity_below_consumers,
+    capacity_below_consumers_no_hold,
     cold_start,
     flapping_capacity,
     half_pool_banned,
@@ -52,18 +53,46 @@ def test_capacity_below_consumers_starves_nobody() -> None:
     metrics = sim.run()
 
     assert metrics.starved == []
-    assert metrics.completed == 20 * 50
+    assert metrics.completed == 20 * 10
     assert all(c.remaining == 0 for c in sim.consumers.values())
 
 
+def test_window_shorter_than_the_work_unit_breaks_the_loop() -> None:
+    """Контрольный замер к прогону 4: без удержания окно не успевают использовать.
+
+    Окно переезжает каждые 5 с, а проверка домена длится 20 с, поэтому потребитель
+    получает окно, ставит работу и теряет окно раньше, чем работа доходит: вместо
+    выполнения она уходит в `defer`. Удержание здесь не оптимизация записей, а условие
+    работоспособности контура, и экономия записей — следствие.
+    """
+    held = capacity_below_consumers().run()
+    bare = capacity_below_consumers_no_hold().run()
+
+    assert held.completed == 200
+    assert bare.completed < 20
+    assert bare.deferred > 1000
+    assert held.deferred == 0
+    assert held.window_writes * 50 < bare.window_writes
+
+
 def test_capacity_below_consumers_rotates_evenly() -> None:
-    """Ротация DRR: доли тактов с выдачей у потребителей не расходятся вдвое."""
+    """Ротация DRR: доли тактов с выдачей у потребителей не расходятся вдвое.
+
+    Удержание делает квант крупнее, поэтому доли расходятся заметнее, чем при выдаче
+    по одному такту. Справедливость, которую видит пользователь, — это хвост закрытия
+    батчей: он не должен превышать нескольких кругов раздачи, где круг — время, за
+    которое окно обойдёт всех потребителей.
+    """
     sim = capacity_below_consumers()
     metrics = sim.run()
     served = [metrics.served_ticks[cid] for cid in sim.consumers]
+    finished = list(metrics.finished_at.values())
+    hold_seconds = sim.config.min_hold_ticks * sim.config.tick
+    full_round = len(sim.consumers) / metrics.peak_effective * hold_seconds
 
     assert min(served) > 0
     assert max(served) <= 2 * min(served)
+    assert max(finished) - min(finished) <= 3 * full_round
 
 
 def test_mass_ban_recovers_through_replenishment() -> None:

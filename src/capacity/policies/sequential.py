@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from capacity.types import Allocation, ConsumerState
+from capacity.types import Allocation, ConsumerState, Hold
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +38,13 @@ class Sequential:
         capacity: int,
         consumers: Sequence[ConsumerState],
         deficits: Mapping[str, int],
+        holds: Mapping[str, Hold] | None = None,
     ) -> Allocation:
-        """`capacity` здесь — число потребителей с живым ресурсом (см. `allocate_alive`)."""
+        """`capacity` здесь — число потребителей с живым ресурсом (см. `allocate_alive`).
+
+        Очереди между потребителями нет, поэтому ни дефициты, ни удержания выделенному
+        пулу не нужны: окно у каждого своё и от соседей не зависит.
+        """
         alive = {c.consumer_id for c in consumers[:capacity]}
         return self.allocate_alive(consumers, alive)
 

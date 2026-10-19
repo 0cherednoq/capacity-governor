@@ -6,7 +6,13 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
-from capacity.types import Allocation, ConsumerState, EligibleCapacity, SupplySnapshot
+from capacity.types import (
+    Allocation,
+    ConsumerState,
+    EligibleCapacity,
+    Hold,
+    SupplySnapshot,
+)
 
 
 @runtime_checkable
@@ -18,6 +24,7 @@ class AllocationPolicy(Protocol):
         capacity: int,
         consumers: Sequence[ConsumerState],
         deficits: Mapping[str, int],
+        holds: Mapping[str, Hold] | None = None,
     ) -> Allocation: ...
 
 
@@ -60,11 +67,15 @@ class Replenisher(Protocol):
 
 @runtime_checkable
 class DeficitStore(Protocol):
-    """Дефициты DRR между тактами: лидер меняется, значит состояние вне памяти (G6, G7)."""
+    """Состояние политики между тактами: лидер меняется, значит оно вне памяти (G6, G7).
 
-    def load(self) -> Mapping[str, int]: ...
+    Дефициты DRR и удержания окон переносятся вместе: по отдельности они
+    рассогласуются, и потребитель получит либо чужое удержание, либо чужую очередь.
+    """
 
-    def save(self, deficits: Mapping[str, int]) -> None: ...
+    def load(self) -> tuple[Mapping[str, int], Mapping[str, Hold]]: ...
+
+    def save(self, deficits: Mapping[str, int], holds: Mapping[str, Hold]) -> None: ...
 
 
 @runtime_checkable

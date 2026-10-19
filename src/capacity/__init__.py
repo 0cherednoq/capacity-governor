@@ -12,6 +12,7 @@ from capacity.types import (
     Allocation,
     ConsumerState,
     EligibleCapacity,
+    Hold,
     SupplySnapshot,
     TickReport,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "Allocation",
     "ConsumerState",
     "EligibleCapacity",
+    "Hold",
     "MaxMinFair",
     "Recommendation",
     "ReorderPoint",

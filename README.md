@@ -66,7 +66,7 @@ tests/                   таблицы приёмки плана и приём�
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-pytest                  # 94 теста: таблицы приёмки плана и прогоны симуляции
+pytest                  # 97 тестов: таблицы приёмки плана и прогоны симуляции
 python -m sim            # отчёт по шести прогонам G8
 ruff check . && mypy src tests sim
 ```
