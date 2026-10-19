@@ -114,12 +114,15 @@ class EligibleCapacity:
         `work_units`: сколько единиц работы покрывает остаток кредитов. Оно связывает
         только хвост, когда кредитов осталось меньше, чем ресурсов.
 
-        `free`, `leased`, `reserved` и `effective` остаются величинами наблюдаемости
-        (G1.3) — по ним строится график загрузки пула.
+        **Резерв вычитается.** `reserved` — часть пула, которую его владелец держит
+        под другие нужды: раздать её значит выдать окна под ресурсы, которых контуру
+        не дадут. `free` и `leased` остаются величинами наблюдаемости (G1.3) — по ним
+        строится график загрузки пула.
         """
+        available = max(0, self.eligible - self.reserved)
         if self.work_units is None:
-            return self.eligible
-        return min(self.eligible, self.work_units)
+            return available
+        return min(available, self.work_units)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +159,8 @@ class TickReport:
     grants: Mapping[str, int]
     window_deltas: Mapping[str, int] = field(default_factory=dict)
     skipped_by_tolerance: int = 0
+    oversubscribed: int = 0
+    """Сумма окон сверх ёмкости. В норме ноль: больше ресурса, чем есть, не раздаётся."""
     ordered: int = 0
     order_budget_left: int = 0
 

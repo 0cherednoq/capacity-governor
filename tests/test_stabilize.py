@@ -141,3 +141,92 @@ def test_rejects_bad_tolerance(tolerance: float) -> None:
 def test_rejects_negative_stabilize_down() -> None:
     with pytest.raises(ValueError, match="stabilize_down"):
         Stabilizer(stabilize_down=timedelta(seconds=-1))
+
+
+# --- инвариант: сумма окон не больше ёмкости ----------------------------------------
+
+
+def test_held_decrease_is_cut_when_it_would_oversubscribe(stab: Stabilizer) -> None:
+    """Выдержка экономит запись, но не ценой работы под несуществующий ресурс."""
+    stab.apply(T0, {"a": 100}, {"a": 100}, capacity=100)
+
+    result = stab.apply(T0 + TICK, {"a": 60}, {"a": 100}, capacity=60)
+
+    assert result.windows == {"a": 60}
+    assert result.oversubscribed == 0
+
+
+def test_decrease_is_still_held_while_capacity_allows(stab: Stabilizer) -> None:
+    """Ёмкость цела, упал спрос — держим окно, как и задумано."""
+    stab.apply(T0, {"a": 100}, {"a": 100}, capacity=100)
+
+    result = stab.apply(T0 + TICK, {"a": 60}, {"a": 100}, capacity=100)
+
+    assert result.windows == {}
+    assert result.held_down == 1
+
+
+def test_cut_starts_with_the_most_oversubscribed(stab: Stabilizer) -> None:
+    """Режем того, кто выиграл от отсрочки больше всех."""
+    current = {"a": 60, "b": 40}
+    stab.apply(T0, current, current, capacity=100)
+
+    result = stab.apply(T0 + TICK, {"a": 20, "b": 35}, current, capacity=70)
+
+    # Лишних 30: 25 из них держал «a», 5 — «b».
+    assert result.windows == {"a": 30}
+    assert result.oversubscribed == 0
+
+
+def test_arriving_consumer_forces_the_neighbour_to_shrink(stab: Stabilizer) -> None:
+    """Пришёл второй потребитель: его окно пишется, первого — ужимается сразу."""
+    stab.apply(T0, {"a": 30}, {"a": 30}, capacity=30)
+
+    result = stab.apply(T0 + TICK, {"a": 15, "b": 15}, {"a": 30}, capacity=30)
+
+    assert result.windows == {"a": 15, "b": 15}
+    assert result.oversubscribed == 0
+
+
+def test_pins_spend_capacity_too(stab: Stabilizer) -> None:
+    """Пин окна не получает, но ресурс расходует — бюджет остальных меньше."""
+    stab.apply(T0, {"a": 20}, {"a": 20}, capacity=30, spent_elsewhere=10)
+
+    result = stab.apply(T0 + TICK, {"a": 5}, {"a": 20}, capacity=30, spent_elsewhere=25)
+
+    assert result.windows == {"a": 5}
+
+
+def test_oversubscription_is_reported_when_it_cannot_be_fixed(stab: Stabilizer) -> None:
+    """Оператор запинил больше, чем есть: контур это показывает, а не прячет."""
+    result = stab.apply(T0, {"a": 10}, {}, capacity=10, spent_elsewhere=14)
+
+    assert result.oversubscribed == 14
+    assert result.windows == {"a": 10}
+
+
+def test_without_capacity_the_invariant_is_not_enforced(stab: Stabilizer) -> None:
+    """Контрольный замер «до»: без ёмкости выдержка держит окно и переподписывает."""
+    stab.apply(T0, {"a": 100}, {"a": 100})
+
+    result = stab.apply(T0 + TICK, {"a": 60}, {"a": 100})
+
+    assert result.windows == {}
+
+
+# --- история и смена лидера ---------------------------------------------------------
+
+
+def test_returning_leader_starts_observing_again() -> None:
+    """Процесс вернулся спустя долгое время: его история уже не описывает период."""
+    stab = Stabilizer(stabilize_down=timedelta(seconds=30))
+    for i in range(10):
+        stab.apply(T0 + i * TICK, {"a": 100}, {"a": 100}, capacity=100)
+
+    # Лидерство ушло другому процессу на десять минут и вернулось.
+    late = stab.apply(
+        T0 + timedelta(seconds=600), {"a": 60}, {"a": 100}, capacity=100
+    )
+
+    assert late.windows == {}
+    assert late.held_down == 1

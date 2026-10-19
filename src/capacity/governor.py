@@ -85,7 +85,16 @@ def plan_tick(
     recommended = {
         cid: grant for cid, grant in allocation.grants.items() if cid not in pins
     }
-    stabilized = stabilizer.apply(now, recommended, current_windows)
+    # Пины ёмкость расходуют, хотя их окна контур не пишет: их доля вычитается из
+    # бюджета, иначе отложенные уменьшения разойдутся с тем, что есть на самом деле.
+    spent_by_pins = sum(allocation.grants.get(cid, 0) for cid in pins)
+    stabilized = stabilizer.apply(
+        now,
+        recommended,
+        current_windows,
+        capacity=capacity.allocatable,
+        spent_elsewhere=spent_by_pins,
+    )
     windows: Mapping[str, int] = {} if paused else stabilized.windows
 
     order = 0
@@ -104,6 +113,7 @@ def plan_tick(
             cid: limit - current_windows.get(cid, 0) for cid, limit in windows.items()
         },
         skipped_by_tolerance=stabilized.skipped_by_tolerance + stabilized.held_down,
+        oversubscribed=stabilized.oversubscribed,
         ordered=order,
         order_budget_left=budget_left,
     )

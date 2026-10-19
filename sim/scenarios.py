@@ -120,6 +120,35 @@ def half_pool_banned() -> Simulation:
     )
 
 
+def second_consumer_arrives() -> Simulation:
+    """Прогон 7: к работающему потребителю приходит второй.
+
+    Вопрос инварианта: окно первого обязано ужаться немедленно. Пока уменьшение
+    откладывалось «ради экономии записей», сумма окон держалась в полтора раза выше
+    ёмкости несколько минут — это работа, выпущенная под несуществующий ресурс.
+    """
+    config = replace(BASE, horizon=2 * 3600)
+    consumers = [Consumer("batch-a", remaining=2000)]
+    events: list[tuple[float, Callable[[Simulation], None]]] = [
+        (300.0, lambda sim: sim.add_consumer(Consumer("batch-b", remaining=2000)))
+    ]
+    return Simulation(config, consumers, accounts=30, events=events)
+
+
+def capacity_drops() -> Simulation:
+    """Прогон 8: ёмкость падает втрое на ходу.
+
+    Тот же вопрос с другой стороны: ресурса стало меньше, а окна выставлены под
+    прежний объём. Инвариант обязан срезать их в том же такте.
+    """
+    config = replace(BASE, horizon=2 * 3600, max_per_window=0)
+    consumers = [Consumer("batch-a", remaining=1500), Consumer("batch-b", remaining=1500)]
+    events: list[tuple[float, Callable[[Simulation], None]]] = [
+        (600.0, lambda sim: sim.ban(2 / 3))
+    ]
+    return Simulation(config, consumers, accounts=30, events=events)
+
+
 def flapping_capacity() -> Simulation:
     """Прогон 6: колеблющаяся ёмкость (аккаунты входят и выходят из COOLING).
 
@@ -164,6 +193,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         capacity_below_consumers_no_hold,
     ),
     Scenario("5. массовый бан пула", "defer держит, пополнение поднимает", half_pool_banned),
+    Scenario(
+        "7. приходит второй потребитель",
+        "окно первого ужимается сразу, переподписки нет",
+        second_consumer_arrives,
+    ),
+    Scenario(
+        "8. ёмкость падает втрое",
+        "окна режутся в том же такте",
+        capacity_drops,
+    ),
     Scenario("6. колеблющаяся ёмкость", "записей окон мало (мёртвая зона)", flapping_capacity),
     Scenario("6б. без мёртвой зоны", "контрольный замер к прогону 6", no_dead_zone_baseline),
 )

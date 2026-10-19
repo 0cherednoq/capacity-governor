@@ -122,14 +122,13 @@ def test_no_order_means_no_window_key() -> None:
     assert (plan.order, plan.order_window_key) == (0, None)
 
 
-def test_dead_zone_holds_the_window_between_ticks() -> None:
-    """Ёмкость подтаяла на 4 % — окно не дёргаем (G5)."""
+def test_dead_zone_holds_the_window_when_capacity_allows() -> None:
+    """Спрос подтаял на 4 %, ёмкость цела — окно не дёргаем (G5)."""
     stabilizer = Stabilizer(tolerance=0.1)
-    consumers = [ConsumerState("a", 1000)]
     first = plan_tick(
         now=NOW,
         capacity=cap(100),
-        consumers=consumers,
+        consumers=[ConsumerState("a", 1000)],
         deficits={},
         current_windows={},
         policy=MaxMinFair(),
@@ -139,8 +138,8 @@ def test_dead_zone_holds_the_window_between_ticks() -> None:
 
     second = plan_tick(
         now=NOW + timedelta(seconds=5),
-        capacity=cap(96),
-        consumers=consumers,
+        capacity=cap(100),
+        consumers=[ConsumerState("a", 96)],
         deficits=first.deficits,
         current_windows={"a": 100},
         policy=MaxMinFair(),
@@ -149,6 +148,39 @@ def test_dead_zone_holds_the_window_between_ticks() -> None:
 
     assert second.windows == {}
     assert second.report.skipped_by_tolerance == 1
+    assert second.report.oversubscribed == 0
+
+
+def test_dead_zone_does_not_oversubscribe_when_capacity_falls() -> None:
+    """Ёмкость упала — окно режется сразу, сколько бы ни оставалось выдержки.
+
+    Отложенное уменьшение экономит запись в базу, но платит за неё работой,
+    выпущенной под ресурс, которого уже нет. Инвариант сильнее экономии.
+    """
+    stabilizer = Stabilizer(tolerance=0.1)
+    consumers = [ConsumerState("a", 1000)]
+    plan_tick(
+        now=NOW,
+        capacity=cap(100),
+        consumers=consumers,
+        deficits={},
+        current_windows={},
+        policy=MaxMinFair(),
+        stabilizer=stabilizer,
+    )
+
+    second = plan_tick(
+        now=NOW + timedelta(seconds=5),
+        capacity=cap(96),
+        consumers=consumers,
+        deficits={},
+        current_windows={"a": 100},
+        policy=MaxMinFair(),
+        stabilizer=stabilizer,
+    )
+
+    assert second.windows == {"a": 96}
+    assert second.report.oversubscribed == 0
 
 
 def test_capacity_loss_stops_work_immediately() -> None:

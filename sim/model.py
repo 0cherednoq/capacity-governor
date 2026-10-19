@@ -105,6 +105,13 @@ class SimMetrics:
 
     window_writes: int = 0
     windows_skipped: int = 0
+    oversubscription: int = 0
+    """Переподписка в единица·такт: сумма окон сверх ёмкости за все такты.
+
+    Каждая такая единица — работа, выпущенная под ресурс, которого нет: с ретраями
+    брокера она сжигает попытку, с `item.defer` — копит отложения.
+    """
+    oversubscribed_ticks: int = 0
     orders: int = 0
     order_ticks: int = 0
     registrations_done: int = 0
@@ -180,6 +187,11 @@ class Simulation:
         self.all_accounts.append(account)
         self.pool.put(account)
         return account
+
+    def add_consumer(self, consumer: Consumer) -> None:
+        """Новый потребитель посреди прогона: батч создан, работа поставлена."""
+        self.consumers[consumer.consumer_id] = consumer
+        self.env.process(self._dispatcher(consumer))
 
     def ban(self, fraction: float) -> None:
         """Забанить долю живого пула — сценарий 5 прогонов G8."""
@@ -266,6 +278,17 @@ class Simulation:
             self.metrics.window_writes += len(plan.windows)
             self.metrics.windows_skipped += plan.report.skipped_by_tolerance
             self.metrics.ticks += 1
+
+            # Инвариант: сумма окон, которыми контур управляет в этом такте, не больше
+            # ёмкости. Потребители, закончившие работу, из такта выпадают — их окна
+            # ничего не держат, потому что ставить под них нечего.
+            in_tick = sum(
+                self.consumers[cid].window for cid in plan.allocation.grants
+            )
+            over = in_tick - capacity.allocatable
+            if over > 0:
+                self.metrics.oversubscription += over
+                self.metrics.oversubscribed_ticks += 1
             for cid, grant in plan.allocation.grants.items():
                 if grant > 0:
                     self.metrics.served_ticks[cid] += 1
@@ -356,6 +379,8 @@ class Simulation:
         lines = [
             f"тактов: {m.ticks} за {hours:.0f} ч",
             f"записей окон: {m.window_writes} (пропущено мёртвой зоной: {m.windows_skipped})",
+            f"переподписка: {m.oversubscription} единица·такт "
+            f"в {m.oversubscribed_ticks} тактах",
             f"заказов: {m.orders} в {m.order_ticks} тактах, "
             f"готово {m.registrations_done}, упало {m.registrations_failed}",
             f"работы сделано: {m.completed}, отложено (defer): {m.deferred}",

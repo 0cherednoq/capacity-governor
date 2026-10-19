@@ -6,11 +6,13 @@ from sim.model import windows_per_hour
 from sim.scenarios import (
     capacity_below_consumers,
     capacity_below_consumers_no_hold,
+    capacity_drops,
     cold_start,
     flapping_capacity,
     half_pool_banned,
     no_dead_zone_baseline,
     ordinary_day,
+    second_consumer_arrives,
     surge,
 )
 
@@ -96,21 +98,31 @@ def test_capacity_below_consumers_rotates_evenly() -> None:
 
 
 def test_mass_ban_recovers_through_replenishment() -> None:
-    """Прогон 5: окна вниз, `defer` держит работу, пополнение поднимает пул."""
+    """Прогон 5: окна вниз, пополнение поднимает пул, работа доходит.
+
+    Отложений здесь больше нет, и это следствие инварианта: окна режутся в том же
+    такте, в котором пропала ёмкость, поэтому работа под несуществующий ресурс не
+    ставится вовсе и откладывать нечего.
+    """
     sim = half_pool_banned()
     metrics = sim.run()
 
     assert metrics.orders > 0
     assert metrics.registrations_done > 0
-    assert metrics.deferred > 0
     assert metrics.completed == 3000
+    assert metrics.deferred == 0
 
 
 def test_dead_zone_cuts_window_writes_by_an_order_of_magnitude() -> None:
     """Прогон 6: число записей окон — метрика качества мёртвой зоны.
 
     Сравнение с контрольным прогоном без мёртвой зоны и выдержки: на одной и той же
-    колеблющейся ёмкости записей должно быть в разы меньше при той же сделанной работе.
+    колеблющейся ёмкости записей меньше при той же сделанной работе.
+
+    Выигрыш скромнее, чем был до инварианта (114 против 169, а не 9 против 114): теперь
+    уменьшение окна нельзя отложить, если оно создаёт переподписку, и на колеблющейся
+    ёмкости такие уменьшения — большинство. Это осознанный размен: экономия записей
+    уступила тому, чтобы не выпускать работу под исчезнувший ресурс.
     """
     guarded = flapping_capacity()
     guarded_metrics = guarded.run()
@@ -118,8 +130,8 @@ def test_dead_zone_cuts_window_writes_by_an_order_of_magnitude() -> None:
     bare_metrics = bare.run()
 
     assert guarded_metrics.completed == bare_metrics.completed
-    assert guarded_metrics.window_writes * 5 < bare_metrics.window_writes
-    assert windows_per_hour(guarded_metrics, guarded.config) < 25
+    assert guarded_metrics.window_writes < bare_metrics.window_writes
+    assert windows_per_hour(guarded_metrics, guarded.config) < 40
 
 
 def test_runs_are_deterministic() -> None:
@@ -132,3 +144,39 @@ def test_runs_are_deterministic() -> None:
         second.completed,
         second.orders,
     )
+
+
+# --- инвариант ёмкости --------------------------------------------------------------
+
+
+def test_no_run_oversubscribes() -> None:
+    """Критерий приёмки: во всех прогонах сумма окон не превышает ёмкость."""
+    runs = {
+        "холодный старт": cold_start(),
+        "обычные сутки": ordinary_day(),
+        "наплыв": surge(),
+        "ёмкость < потребителей": capacity_below_consumers(),
+        "массовый бан": half_pool_banned(),
+        "колеблющаяся ёмкость": flapping_capacity(),
+    }
+    over = {name: sim.run().oversubscription for name, sim in runs.items()}
+
+    assert over == dict.fromkeys(runs, 0)
+
+
+def test_arriving_consumer_does_not_oversubscribe() -> None:
+    """Прогон 7: второй потребитель пришёл — первый ужался в том же такте."""
+    sim = second_consumer_arrives()
+    metrics = sim.run()
+
+    assert metrics.oversubscription == 0
+    assert metrics.completed == 4000
+
+
+def test_falling_capacity_does_not_oversubscribe() -> None:
+    """Прогон 8: ёмкость упала втрое — окна срезаны сразу, работа не сгорела."""
+    sim = capacity_drops()
+    metrics = sim.run()
+
+    assert metrics.oversubscription == 0
+    assert metrics.deferred == 0

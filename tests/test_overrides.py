@@ -110,11 +110,10 @@ async def test_pinned_window_is_not_written_but_capacity_is_spent() -> None:
 
 
 async def test_unpin_returns_the_consumer_to_the_allocation() -> None:
-    """Снятый пин снова участвует в раздаче — его окно пишется сразу.
+    """Снятый пин снова участвует в раздаче, и соседу приходится потесниться.
 
-    Сосед при этом остаётся с прежним, более широким окном: его уменьшение держит
-    выдержка стабилизатора (G5). Так и задумано — вниз контур идёт медленно, и
-    снятие пина не исключение.
+    Уменьшение окна соседа обычно держала бы выдержка стабилизатора, но держать его
+    здесь значило бы раздать 12 окон на 10 ресурсов. Инвариант важнее экономии записи.
     """
     governor, store, windows = build(free=10)
 
@@ -125,11 +124,6 @@ async def test_unpin_returns_the_consumer_to_the_allocation() -> None:
     await governor.tick()
 
     assert store.pins == {}
-    assert windows.windows == {"c0": 5, "c1": 7}
-
-    advance(governor, 301)
-    await governor.tick()
-
     assert windows.windows == {"c0": 5, "c1": 5}
 
 
