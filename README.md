@@ -70,6 +70,41 @@ tests/                   таблицы приёмки плана, контур 
 Tallyho и Identity Hub написаны против публичных сигнатур этих сервисов и не
 импортируют их: единственная настоящая зависимость — SQLAlchemy, в extras `[postgres]`.
 
+## Как подключить в проекте
+
+Контур собирается из политики, слоя стабилизации и адаптеров. Всё, кроме фильтра
+годности и перевода `consumer_id` в батч, — готовый код.
+
+```python
+scope = PostgresTickScope(session_scope=sessionmaker, scope="domains")
+state = PostgresStateStore(scope, scope="domains")
+capacity = IdentityHubCapacity(
+    hub.identities,
+    eligible_filter=IdentityFilter(lifecycle="ready", standing="good"),
+    work_units=lambda: remaining_credits(hub),   # модель кредитов — ваша
+    credits_per_resource=100,
+)
+governor = Governor(
+    scope=scope,
+    capacity_source=capacity,
+    registry=TallyhoConsumers(th, batches_of_the_run),
+    windows=TallyhoWindows(th, resolve_batch, journal=state, session_provider=scope.session),
+    state=state,
+    policy=MaxMinFair(min_hold_ticks=5),        # ceil(время единицы работы / такт) + 1
+    clock=lambda: datetime.now(UTC),
+    stabilizer=Stabilizer(tolerance=0.1, stabilize_down=timedelta(seconds=300)),
+    overrides=PostgresOverrideStore(scope, scope="domains"),
+    supply=PoolSupply(capacity, demand_units, ledger.counts, credits_per_resource=100),
+    reorder=ReorderPoint(target=50, reorder_ratio=0.2, max_per_window=20),
+    replenisher=TallyhoReplenisher(submit_registration_batch),
+)
+await governor.run(every=timedelta(seconds=5), stop=shutdown)
+```
+
+Две таблицы (`capacity_governor_state`, `capacity_governor_override`) описаны в
+`capacity_adapters.postgres.METADATA` — миграция за проектом. Рабочий пример сборки
+целиком лежит в `tests/test_wiring.py`.
+
 ## Как запускать
 
 ```bash
