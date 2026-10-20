@@ -191,9 +191,8 @@ async def test_a_rm_work_survives_a_vanishing_pool(
         policy=MaxMinFair(),
         clock=clock,
         stabilizer=Stabilizer(),
-        # Часы будильника — настоящие: `reschedule` переносит работу на переданный
-        # момент, а виртуальные часы такта идут впереди и отправили бы её в будущее.
-        waker=TallyhoWaker(client, now=lambda: datetime.now(UTC)),
+        # Будим только своих: работа, отложенная по другим причинам, ждёт свой срок.
+        waker=TallyhoWaker(client, reasons=["no_resource"]),
         min_tick_interval=timedelta(seconds=5),
     )
 
@@ -262,7 +261,7 @@ async def test_a_rm_window_never_exceeds_the_pool(
         policy=MaxMinFair(),
         clock=clock,
         stabilizer=Stabilizer(),
-        waker=TallyhoWaker(client, now=lambda: datetime.now(UTC)),
+        waker=TallyhoWaker(client, reasons=["no_resource"]),
     )
 
     pool.add(count=5, credits_each=1)

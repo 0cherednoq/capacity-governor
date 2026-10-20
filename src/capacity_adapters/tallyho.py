@@ -105,7 +105,9 @@ class BatchView(Protocol):
 class BatchHandle(Protocol):
     async def view(self) -> BatchView: ...
 
-    async def reschedule(self, start_at: datetime, *, session: Any = None) -> int: ...
+    async def release_deferred(
+        self, reasons: Collection[str] | None = ..., *, session: Any = ...
+    ) -> int: ...
 
     async def set_max_in_flight(
         self, limit: int, *, session: Any = None, reason: str | None = None
@@ -279,32 +281,29 @@ class TallyhoWindows:
 
 @dataclass(slots=True)
 class TallyhoWaker:
-    """`DeferredWaker` поверх `handle.reschedule()`.
+    """`DeferredWaker` поверх `handle.release_deferred()`.
 
-    Задача, не получившая ресурс, откладывает себя на выбранный ею срок. Когда контур
-    открывает окно раньше этого срока, работа всё равно ждёт — `reschedule(now)`
-    переносит её на сейчас.
+    Задача, не получившая ресурс, откладывает себя на выбранный ею срок — выбранный
+    вслепую, потому что когда ресурс вернётся, она не знает. Контур знает: он сам
+    открывает окно, и в этом же такте будит отложенных.
 
-    **Переносится всё, что ещё не отправлено**, а не только отложенное из-за ресурса:
-    такого API в Tallyho нет. Поэтому будить стоит только те батчи, где единственная
-    причина отложения — нехватка ресурса. Если проект откладывает работу и по своим
-    причинам (скажем, ретрай через час), берите короткие сроки для ресурсных причин и
-    не подключайте этот порт.
+    `reasons` стоит задать своими причинами отложения (например, `["no_accounts"]`):
+    тогда работа, отложенная по другим поводам — скажем, ретрай через час, — продолжит
+    ждать свой срок. `None` будит всех отложенных батча.
 
-    `now` обязан быть **настоящими** часами, даже если контур в тестах живёт по
-    виртуальным: `reschedule` переносит работу на переданный момент, и часы, идущие
-    впереди реальных, отправят её в будущее — работа встанет вместо того, чтобы
-    проснуться.
+    Будильник ничего не ломает: пауза, отложенный старт и окно соблюдаются, выпуск
+    идёт в пределах свободного места, счётчики отложений не сбрасываются (потолки
+    `max_defers` пробуждением не обойти), а сам вызов идемпотентен.
     """
 
     client: TallyhoClient
-    now: Callable[[], datetime]
+    reasons: Collection[str] | None = None
     session_provider: Callable[[], Any] | None = None
 
     async def wake(self, consumer_id: str) -> None:
         session = self.session_provider() if self.session_provider else None
-        await self.client.handle(UUID(consumer_id)).reschedule(
-            self.now(), session=session
+        await self.client.handle(UUID(consumer_id)).release_deferred(
+            self.reasons, session=session
         )
 
 

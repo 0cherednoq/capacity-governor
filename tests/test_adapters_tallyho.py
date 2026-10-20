@@ -73,8 +73,10 @@ class FakeHandle:
     batch_id: UUID
     client: FakeTallyho
 
-    async def reschedule(self, start_at: datetime, *, session: object = None) -> int:
-        self.client.rescheduled.append((self.batch_id, start_at, session))
+    async def release_deferred(
+        self, reasons: Collection[str] | None = None, *, session: object = None
+    ) -> int:
+        self.client.woken.append((self.batch_id, reasons, session))
         return 0
 
     async def view(self) -> FakeView:
@@ -138,7 +140,7 @@ class FakeTallyho:
     )
     batches: list[tuple[str, str | None, bool, int | None]] = field(default_factory=list)
     added: list[str] = field(default_factory=list)
-    rescheduled: list[tuple[UUID, datetime, object]] = field(default_factory=list)
+    woken: list[tuple[UUID, Collection[str] | None, object]] = field(default_factory=list)
     views: int = 0
 
     def handle(self, batch_id: UUID) -> FakeHandle:
@@ -239,30 +241,41 @@ async def test_wakeable_source_reports_the_whole_backlog() -> None:
 # --- будильник ----------------------------------------------------------------------
 
 
-async def test_waker_reschedules_the_batch_to_now() -> None:
-    """Окно открылось раньше срока отложения — работу переносим на сейчас."""
+async def test_waker_releases_deferred_work() -> None:
+    """Окно открылось раньше срока отложения — выпускаем отложенных немедленно."""
     row = FakeDemand(pending=5, deferred=5)
     client = FakeTallyho(rows=[row])
-    waker = TallyhoWaker(client, now=lambda: NOW)
+    waker = TallyhoWaker(client)
 
     await waker.wake(str(row.id))
 
-    assert client.rescheduled == [(row.id, NOW, None)]
+    assert client.woken == [(row.id, None, None)]
+
+
+async def test_waker_wakes_only_its_own_reasons() -> None:
+    """Работа, отложенная по чужому поводу, продолжает ждать свой срок."""
+    row = FakeDemand(pending=5, deferred=5)
+    client = FakeTallyho(rows=[row])
+    waker = TallyhoWaker(client, reasons=["no_accounts"])
+
+    await waker.wake(str(row.id))
+
+    assert client.woken == [(row.id, ["no_accounts"], None)]
 
 
 async def test_waker_uses_the_tick_session() -> None:
     row = FakeDemand(pending=5, deferred=5)
     client = FakeTallyho(rows=[row])
     session = object()
-    waker = TallyhoWaker(client, now=lambda: NOW, session_provider=lambda: session)
+    waker = TallyhoWaker(client, session_provider=lambda: session)
 
     await waker.wake(str(row.id))
 
-    assert client.rescheduled[0][2] is session
+    assert client.woken[0][2] is session
 
 
 def test_waker_satisfies_the_port() -> None:
-    assert isinstance(TallyhoWaker(FakeTallyho(), now=lambda: NOW), DeferredWaker)
+    assert isinstance(TallyhoWaker(FakeTallyho()), DeferredWaker)
 
 
 async def test_paused_batch_is_not_a_consumer() -> None:
