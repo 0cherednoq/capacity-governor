@@ -48,6 +48,8 @@ SCHEMA = "capacity_acceptance"
 tallyho = pytest.importorskip("tallyho", reason="Tallyho не установлен")
 testing = pytest.importorskip("tallyho.testing", reason="Tallyho не установлен")
 
+from tallyho import Defer, Ok, Outcome  # noqa: E402 - после importorskip
+
 
 @dataclass
 class ResourcePool:
@@ -97,21 +99,28 @@ class ResourcePool:
 pool = ResourcePool()
 
 
-async def paid_operation(item_no: int) -> None:
-    """Единица работы: платный вызов, который можно делать только с ресурса."""
+async def paid_operation(item_no: int) -> Outcome:
+    """Единица работы: платный вызов, который можно делать только с ресурса.
+
+    Итог возвращается значением, а не вызывается отдельной строкой, и это не
+    косметика. `item.defer()` сам по себе выполнение не прерывает: забытый после него
+    `return` означает, что задача и отложится, и продолжит работать без ресурса. С
+    типом `Outcome` такую ошибку поймает mypy — путь без итога просто не пройдёт
+    проверку.
+    """
     resource = pool.lease()
     if resource is None:
         # Ресурса нет — откладываем, не тратя попытку. Это и есть «не сгоревший ретрай».
-        pool.deferrals += 1
         # Срок намеренно длинный: пока ресурса нет, работа не должна возвращаться в
         # брокер по таймеру. Разбудит её контур, когда окно снова откроется.
-        tallyho.item.defer(reason="no_resource", delay=timedelta(minutes=5))
-        return
+        pool.deferrals += 1
+        return Defer(reason="no_resource", delay=timedelta(minutes=5))
+
     pool.parallel_now += 1
     pool.peak_parallel = max(pool.peak_parallel, pool.parallel_now)
     try:
         pool.paid_calls += 1
-        tallyho.item.ok("done")
+        return Ok("done")
     finally:
         pool.parallel_now -= 1
         pool.release(resource)

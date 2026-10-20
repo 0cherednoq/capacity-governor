@@ -35,6 +35,8 @@ SCHEMA = "capacity_it_seq"
 tallyho = pytest.importorskip("tallyho", reason="Tallyho не установлен")
 testing = pytest.importorskip("tallyho.testing", reason="Tallyho не установлен")
 
+from tallyho import Ok  # noqa: E402 - после importorskip
+
 
 @dataclass(slots=True)
 class Campaign:
@@ -79,11 +81,11 @@ class Campaign:
 campaigns: dict[str, Campaign] = {}
 
 
-async def send_letter(address: str) -> None:
+async def send_letter(address: str) -> Ok:
     """Единица работы рассылки: письмо уходит через текущего отправителя кампании."""
     campaign = campaigns[address.split("@")[1]]
     campaign.record()
-    tallyho.item.ok("sent")
+    return Ok("sent")
 
 
 @pytest.fixture

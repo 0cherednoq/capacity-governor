@@ -52,20 +52,22 @@ SCHEMA = "capacity_it"
 tallyho = pytest.importorskip("tallyho", reason="Tallyho не установлен")
 testing = pytest.importorskip("tallyho.testing", reason="Tallyho не установлен")
 
+from tallyho import Ok  # noqa: E402 - после importorskip
+
 checked: list[str] = []
 registered: list[tuple[str, int]] = []
 
 
-async def check_domain(domain: str) -> None:
+async def check_domain(domain: str) -> Ok:
     """Единица работы: «проверка домена». Содержание неважно, важен факт расхода."""
     checked.append(domain)
-    tallyho.item.ok("checked")
+    return Ok("checked")
 
 
-async def register_account(window_key: str, slot: int) -> None:
+async def register_account(window_key: str, slot: int) -> Ok:
     """Регистрация одного ресурса. В бою это работа библиотеки авторизации."""
     registered.append((window_key, slot))
-    tallyho.item.ok("registered")
+    return Ok("registered")
 
 
 @dataclass(slots=True)
